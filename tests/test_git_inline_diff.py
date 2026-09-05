@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tempfile
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "git-inline-diff"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "git-inline-diff", "gitinline"))
 
@@ -99,7 +101,7 @@ def test_untracked_marks():
 
 def test_status_and_diff_real_repo():
     if not _has_git():
-        return
+        pytest.skip("no git")
     with tempfile.TemporaryDirectory() as tmp:
         _init_repo(tmp)
         tracked = os.path.join(tmp, "f.txt")
@@ -154,7 +156,7 @@ def test_color_pixbuf_is_small_solid_square():
     pixbuf = gitinline.color_pixbuf("#73C991")
     if gitinline.GdkPixbuf is None:
         assert pixbuf is None
-        return
+        pytest.skip("no GdkPixbuf")
     assert pixbuf.get_width() == gitinline._MARK_ICON_SIZE
     assert pixbuf.get_height() == gitinline._MARK_ICON_SIZE
     assert pixbuf.get_has_alpha() is True
@@ -171,7 +173,7 @@ def test_configure_marks_never_sets_line_background():
 
 def test_buffer_diff_tracks_unsaved_edits():
     if not _has_git():
-        return
+        pytest.skip("no git")
     with tempfile.TemporaryDirectory() as tmp:
         _init_repo(tmp)
         tracked = os.path.join(tmp, "f.txt")
@@ -295,7 +297,7 @@ def test_snapshot_captures_buffer_text_when_dirty():
 
 def test_buffer_matches_head_defers_to_git():
     if not _has_git():
-        return
+        pytest.skip("no git")
     with tempfile.TemporaryDirectory() as tmp:
         _init_repo(tmp)
         with open(os.path.join(tmp, "f.txt"), "w") as f:
@@ -313,7 +315,7 @@ def test_buffer_matches_head_defers_to_git():
 
 def test_query_thread_prefers_disk_when_buffer_matches_it():
     if not _has_git():
-        return
+        pytest.skip("no git")
     with tempfile.TemporaryDirectory() as tmp:
         _init_repo(tmp)
         tracked = os.path.join(tmp, "f.txt")
@@ -373,7 +375,7 @@ def test_apply_result_removes_stale_marks():
     """
     Gtk = _display()
     if Gtk is None or gitinline.GtkSource is None:
-        return
+        pytest.skip("no display")
     buf = gitinline.GtkSource.Buffer.new(None)
     buf.set_text("a\nb\nc\n", -1)
     buf.create_source_mark(

@@ -110,6 +110,6 @@ If you report a problem, run `XED_PLUGIN_DEBUG=1 xed` from a terminal
 
 ## For developers
 
-The test suite runs without pytest or a display — see `AGENTS.md` for
-the exact command, plus contributor notes (plugin reinstall step,
-diagnostics, and conventions).
+The test suite runs under `pytest` — see `AGENTS.md` for the exact command
+(plus `xvfb-run` for display tests), contributor notes (plugin reinstall
+step, diagnostics, and conventions).

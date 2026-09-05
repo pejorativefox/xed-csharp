@@ -3,6 +3,8 @@
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "project-mode"))
 
 import projectmode
@@ -22,7 +24,7 @@ def test_tree_bg_css_covers_gtk3_selectors():
 
 def test_tree_bg_css_parses_when_gtk_available():
     if projectmode.Gtk is None:
-        return
+        pytest.skip("no Gtk")
     provider = projectmode.Gtk.CssProvider()
     provider.load_from_data(projectmode.tree_bg_css().encode("utf-8"))
 
@@ -88,10 +90,9 @@ def test_rebuild_keeps_colors_when_status_unchanged():
 
     Gtk = _display()
     if Gtk is None or projectmode.Gtk is None:
-        return
+        pytest.skip("no display")
     if shutil.which("git") is None:
-        print("SKIP browser recolor test (no git)")
-        return
+        pytest.skip("no git")
     tmp = tempfile.mkdtemp(prefix="browser-recolor-")
 
     def git(*args):

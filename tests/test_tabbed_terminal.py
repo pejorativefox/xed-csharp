@@ -4,6 +4,8 @@ import os
 import sys
 import types
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "tabbed-terminal"))
 
 import tabbedterminal
@@ -76,8 +78,7 @@ def test_plugin_dispatches_new_close_focus():
 
 def test_reveal_activates_panel_and_focuses():
     if tabbedterminal.Gtk is None:
-        print("SKIP reveal test (no Gtk)")
-        return
+        pytest.skip("no Gtk")
     cls = tabbedterminal.TabbedTerminalPlugin
     activated = []
     bottom = types.SimpleNamespace(
@@ -104,8 +105,7 @@ def test_reveal_activates_panel_and_focuses():
 
 def test_window_key_press_drives_handler():
     if tabbedterminal.Gtk is None or tabbedterminal.Gdk is None:
-        print("SKIP tabbed-terminal key test (no Gtk/Gdk)")
-        return
+        pytest.skip("no Gtk/Gdk")
     from gi.repository import Gdk
 
     ns = _plugin_ns()
@@ -184,8 +184,7 @@ def test_apply_theme_rejects_bad_input_without_display():
 
 def test_extract_atom_scheme_end_to_end():
     if tabbedterminal.GtkSource is None:
-        print("SKIP scheme extraction test (no GtkSource)")
-        return
+        pytest.skip("no GtkSource")
     from gi.repository import GtkSource
 
     manager = GtkSource.StyleSchemeManager.get_default()
@@ -202,10 +201,8 @@ def test_extract_atom_scheme_end_to_end():
 
 def test_current_theme_follows_editor_scheme():
     if tabbedterminal.GtkSource is None:
-        print("SKIP follow-editor test (no GtkSource)")
-        return
+        pytest.skip("no GtkSource")
     if tabbedterminal.current_scheme_id() != "atom-one-dark":
-        print("SKIP follow-editor test (editor scheme is not atom-one-dark)")
-        return
+        pytest.skip("editor scheme is not atom-one-dark")
     theme = tabbedterminal.current_editor_theme()
     assert theme == tabbedterminal.atom_one_dark_theme()

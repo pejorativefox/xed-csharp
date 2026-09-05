@@ -7,6 +7,8 @@ display and follow the same Xvfb-or-skip pattern as test_completion_popup.
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "xedcsharp"))
 
 from xedcsharp import gscompletion as gs_mod
@@ -118,7 +120,7 @@ def test_cache_valid_reuse_vs_requery():
 def test_populate_async_never_blocks():
     """VSCode parity: populate returns cache/empty immediately (no 0.35s wait)."""
     if _GUI is None:
-        return
+        pytest.skip("no display")
     import time
 
     Gtk, GtkSource = _GUI
@@ -175,7 +177,7 @@ def test_populate_async_never_blocks():
 
 def test_populate_trigger_character_context():
     if _GUI is None:
-        return
+        pytest.skip("no display")
     Gtk, GtkSource = _GUI
 
     class FakeCtx:
@@ -208,7 +210,7 @@ def test_populate_trigger_character_context():
 
 def test_proposal_filter_text_and_icon():
     if _GUI is None:
-        return
+        pytest.skip("no display")
     Gtk, GtkSource = _GUI
     provider = _provider()
     text = "Console.Wri"
@@ -230,7 +232,7 @@ def test_proposal_filter_text_and_icon():
 def test_match_permissive_while_typing():
     """VSCode shows completion on the first char; the old char-probe gate did not."""
     if _GUI is None:
-        return
+        pytest.skip("no display")
     Gtk, GtkSource = _GUI
     win = Gtk.Window()
     buf = GtkSource.Buffer()
@@ -254,7 +256,7 @@ def test_match_permissive_while_typing():
 
 def test_fetch_sync_uses_cache():
     if not gs_mod._AVAILABLE:
-        return
+        pytest.skip("no GtkSource")
     calls = []
 
     def send_request(method, params, callback):
@@ -272,7 +274,7 @@ def test_fetch_sync_uses_cache():
 
 def test_fetch_timeout_then_late_response_drained():
     if not gs_mod._AVAILABLE:
-        return
+        pytest.skip("no GtkSource")
     pending = []
 
     def send_request(method, params, callback):
@@ -293,14 +295,14 @@ def test_fetch_timeout_then_late_response_drained():
 
 def test_fetch_no_transport_returns_cache():
     if not gs_mod._AVAILABLE:
-        return
+        pytest.skip("no GtkSource")
     provider = _provider(send_request=lambda _m, _p, _c: None)
     assert provider.fetch_sync("/tmp/A.cs", 0, 3, "Con", 3, timeout=0.1) == []
 
 
 def test_proposal_carries_insert_text():
     if _GUI is None:
-        return
+        pytest.skip("no display")
     Gtk, GtkSource = _GUI
     item = gs_mod.RoslynProposal(label="WriteLine", insert_text="WriteLine()", info="void")
     assert item.get_label() == "WriteLine"
@@ -310,7 +312,7 @@ def test_proposal_carries_insert_text():
 
 def test_start_iter_and_activate_on_real_buffer():
     if _GUI is None:
-        return
+        pytest.skip("no display")
     Gtk, GtkSource = _GUI
     provider = _provider()
     buf = GtkSource.Buffer()
@@ -336,7 +338,7 @@ def test_start_iter_and_activate_on_real_buffer():
 
 def test_activate_appends_suffix_by_kind():
     if _GUI is None:
-        return
+        pytest.skip("no display")
     Gtk, GtkSource = _GUI
     provider = _provider()
     buf = GtkSource.Buffer()
@@ -360,7 +362,7 @@ def test_activate_appends_suffix_by_kind():
 
 def test_match_gates_non_csharp():
     if _GUI is None:
-        return
+        pytest.skip("no display")
     Gtk, GtkSource = _GUI
     win = Gtk.Window()
     buf = GtkSource.Buffer()
@@ -384,7 +386,7 @@ def test_match_gates_non_csharp():
 
 def test_attach_detach_view():
     if _GUI is None:
-        return
+        pytest.skip("no display")
     Gtk, GtkSource = _GUI
     win = Gtk.Window()
     view = GtkSource.View.new_with_buffer(GtkSource.Buffer())
@@ -421,7 +423,7 @@ def test_show_completion_uses_native_shape():
     match/populate on a framework-owned context.
     """
     if _GUI is None:
-        return
+        pytest.skip("no display")
     import time
 
     Gtk, GtkSource = _GUI

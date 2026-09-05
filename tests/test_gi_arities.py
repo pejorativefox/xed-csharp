@@ -9,6 +9,8 @@ import inspect
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "xedcsharp"))
 
 # NOTE: importing the package also runs _ensure_xed_gi_paths(), which
@@ -40,7 +42,7 @@ def _signature(ns_cls, method):
 def test_create_tab_from_location_arity():
     sig = _signature(Xed.Window, "create_tab_from_location")
     if sig is None:
-        return
+        pytest.skip(f"no Xed typelib ({_SKIP_REASON[:100]})")
     params = list(sig.parameters)
     assert params == ["self", "location", "encoding", "line_pos", "create", "jump_to"], params
 
@@ -58,8 +60,7 @@ def test_navigation_arities():
         (Xed.Window, "get_active_document", ["self"]),
     ]
     if not _HAVE_XED:
-        print(f"SKIP gi arity navigation ({_SKIP_REASON[:100]})")
-        return
+        pytest.skip(f"no Xed typelib ({_SKIP_REASON[:100]})")
     for cls, method, expected in cases:
         params = list(inspect.signature(getattr(cls, method)).parameters)
         assert params == expected, f"{method}: {params} != {expected}"
@@ -90,7 +91,7 @@ def test_mark_arities():
     """
     GtkSource = _gtksource()
     if GtkSource is None:
-        return
+        pytest.skip("no GtkSource")
     cases = [
         (GtkSource.Buffer, "remove_source_marks",
          ["self", "start", "end", "category"]),

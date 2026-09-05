@@ -4,6 +4,8 @@ import os
 import sys
 import tempfile
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "xedcsharp"))
 
 
@@ -53,7 +55,7 @@ def _expanded(explorer, Gtk):
 
 def test_collapsed_on_first_load_only():
     if _GUI is None:
-        return
+        pytest.skip("no display")
     Gtk = _GUI
     from xedcsharp.explorer import SolutionExplorer
 
@@ -89,7 +91,7 @@ def _model_at(tmp, name):
 
 def test_new_solution_resets_to_top_level():
     if _GUI is None:
-        return
+        pytest.skip("no display")
     Gtk = _GUI
     from xedcsharp.explorer import SolutionExplorer
 
@@ -107,7 +109,7 @@ def test_new_solution_resets_to_top_level():
 
 def test_double_click_keeps_expansion():
     if _GUI is None:
-        return
+        pytest.skip("no display")
     Gtk = _GUI
     from xedcsharp.explorer import SolutionExplorer
 

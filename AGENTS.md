@@ -15,23 +15,21 @@ single-instance reuse keeps the old process *and* its working directory) and:
 XED_PLUGIN_DEBUG=1 xed
 ```
 
-## Tests (no pytest in this env)
+## Tests
 
 ```bash
-python3 -c "import os,glob; d='tests'; files=sorted(glob.glob(d+'/test_*.py')); import importlib.util; fails=0; total=0
-for f in files:
-    name=f.replace('/','_').replace('.py','')
-    spec=importlib.util.spec_from_file_location(name,f); m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
-    for a in dir(m):
-        if a.startswith('test_'):
-            total+=1
-            try: getattr(m,a)()
-            except Exception as e: fails+=1; print(f'FAIL {f}:{a}: {e!r}')
-print(f'{total-fails}/{total} passed')"
+python3 -m pytest -q
+```
+
+Headless; GUI tests report SKIPPED. Full suite including window-spawning
+tests:
+
+```bash
+xvfb-run -a python3 -m pytest -q
 ```
 
 Note: `tests/test_completion_popup.py::test_focus_stays_in_editor_through_show_nav_filter`
-is a pre-existing GUI-focus flake that fails headless (fails on clean tree too).
+is expected to SKIP headless and PASS under `xvfb-run`.
 
 ## Diagnose
 

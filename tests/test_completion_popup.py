@@ -9,6 +9,8 @@ import os
 import sys
 import types
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "xedcsharp"))
 
 
@@ -51,7 +53,7 @@ def _popup():
 
 def test_nav_keys_covered():
     if _GUI is None:
-        return
+        pytest.skip("no display")
     for key in ("Up", "Down", "Return", "Tab", "Escape"):
         assert key in NAV_KEYS, key
 
@@ -59,7 +61,7 @@ def test_nav_keys_covered():
 def test_move_selection_wraps():
     """Like most editors, moving past the ends wraps around."""
     if _GUI is None:
-        return
+        pytest.skip("no display")
     popup = _popup()
     assert popup.selected_item().label == "WriteLine"
     assert popup.move_selection(1) is True
@@ -74,7 +76,7 @@ def test_move_selection_wraps():
 
 def test_handle_nav_key_accept_and_dismiss():
     if _GUI is None:
-        return
+        pytest.skip("no display")
     popup = _popup()
     activated = []
     dismissed = []
@@ -90,7 +92,7 @@ def test_handle_nav_key_accept_and_dismiss():
 
 def test_shift_tab_steps_back_without_accepting():
     if _GUI is None:
-        return
+        pytest.skip("no display")
     popup = _popup()
     activated = []
     popup.connect("item-activated", lambda _w, item: activated.append(item.label))
@@ -102,7 +104,7 @@ def test_shift_tab_steps_back_without_accepting():
 
 def test_update_filter_narrows_and_selects_first():
     if _GUI is None:
-        return
+        pytest.skip("no display")
     popup = _popup()
     popup.set_items(list(_ITEMS))
     assert [i.label for i in popup.update_filter("WriteA")] == ["WriteAsync"]
@@ -114,7 +116,7 @@ def test_update_filter_narrows_and_selects_first():
 def test_popup_does_not_steal_focus():
     """The editor keeps focus so typing filters; the popup never grabs it."""
     if _GUI is None:
-        return
+        pytest.skip("no display")
     popup = _popup()
     assert popup.get_accept_focus() is False
     assert popup.get_focus_on_map() is False
@@ -128,7 +130,7 @@ def test_show_at_view_keeps_editor_focus():
     Showing must map the window and hand focus back to the editor view.
     """
     if _GUI is None:
-        return
+        pytest.skip("no display")
     popup = _popup()
     presented = []
     popup.present = lambda *a: presented.append(True)  # type: ignore[method-assign]
@@ -160,7 +162,7 @@ def test_show_at_view_keeps_editor_focus():
 def test_focus_stays_in_editor_through_show_nav_filter():
     """End-to-end focus regression: show/nav/filter must not move GTK focus."""
     if _GUI is None:
-        return
+        pytest.skip("no display")
     win = Gtk.Window()
     view = Gtk.TextView()
     win.add(view)
@@ -195,7 +197,7 @@ def test_focus_stays_in_editor_through_show_nav_filter():
 def test_view_forwarding_without_popup_focus():
     """The editor view forwards nav keys even if the popup never got focus."""
     if _GUI is None:
-        return
+        pytest.skip("no display")
     import xedcsharp
 
     plugin = xedcsharp.CSharpDevKitPlugin.__new__(xedcsharp.CSharpDevKitPlugin)
@@ -219,7 +221,7 @@ def test_view_forwarding_without_popup_focus():
 
 def test_forwarding_ignored_when_hidden():
     if _GUI is None:
-        return
+        pytest.skip("no display")
     import xedcsharp
 
     plugin = xedcsharp.CSharpDevKitPlugin.__new__(xedcsharp.CSharpDevKitPlugin)
@@ -237,7 +239,7 @@ def test_forwarding_ignored_when_hidden():
 def test_real_gtk_coordinate_shapes():
     """The shapes real Gtk calls return must flow through xy_of."""
     if _GUI is None:
-        return
+        pytest.skip("no display")
     from xedcsharp.intelligence import xy_of
 
     tv = Gtk.TextView()

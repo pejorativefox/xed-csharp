@@ -8,6 +8,8 @@ tests/test_fuzzyfinder.py).
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "xedcsharp"))
 
 
@@ -28,7 +30,7 @@ def _tracker():
 def test_view_handler_ignores_ctrl_p_without_doc():
     tracker = _tracker()
     if tracker is None:
-        return
+        pytest.skip("no Gtk")
     from gi.repository import Gdk
 
     import types
@@ -44,7 +46,7 @@ def test_view_handler_ignores_ctrl_p_without_doc():
 def test_attach_detach_tab_signals():
     tracker = _tracker()
     if tracker is None:
-        return
+        pytest.skip("no Gtk")
     connected: dict = {}
     disconnected: list = []
 

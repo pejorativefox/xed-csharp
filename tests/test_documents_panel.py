@@ -4,6 +4,8 @@ import os
 import sys
 import types
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "feature-toggle"))
 
 import featuretoggle
@@ -58,7 +60,7 @@ def _ns(**kw):
 
 def test_find_locates_nested_panel():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     docs = DocsPanel()
     side = _Side([_Box([docs])])
     assert featuretoggle._find_documents_widget(side) is docs
@@ -66,7 +68,7 @@ def test_find_locates_nested_panel():
 
 def test_find_skips_owned_panels():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     inner = DocsPanel()
     owned = _Box([inner])
     outer = DocsPanel()
@@ -77,7 +79,7 @@ def test_find_skips_owned_panels():
 
 def test_hide_removes_and_records():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     docs = DocsPanel()
     side = _Side([docs])
     plugin = _ns(window=types.SimpleNamespace(get_side_panel=lambda: side))
@@ -88,7 +90,7 @@ def test_hide_removes_and_records():
 
 def test_hide_respects_setting_off():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     docs = DocsPanel()
     side = _Side([docs])
     plugin = _ns(
@@ -102,7 +104,7 @@ def test_hide_respects_setting_off():
 
 def test_restore_readds_with_label():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     docs = DocsPanel()
     side = _Side([])
     plugin = _ns(

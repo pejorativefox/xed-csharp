@@ -183,7 +183,7 @@ def test_project_tree_depth_cap():
         ]
 
 
-def test_load_solution_glob_fallback(tmp_path=None):
+def test_load_solution_glob_fallback():
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:

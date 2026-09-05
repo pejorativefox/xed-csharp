@@ -4,6 +4,8 @@ import os
 import sys
 import types
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "panel-hider"))
 
 import panelhider
@@ -152,7 +154,7 @@ def _ns_with_paned(widget, paned, saved_size=287):
 
 def test_hide_all_panels_sets_both_false():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
 
     def _call(ns):
         panelhider.PanelHiderPlugin._hide_all_panels(ns)
@@ -164,7 +166,7 @@ def test_hide_all_panels_sets_both_false():
 
 def test_toggle_bottom_flips_current_state():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     fake = _FakeSettings()
     saved = panelhider.Gio
     panelhider.Gio = types.SimpleNamespace(
@@ -184,7 +186,7 @@ def test_toggle_bottom_flips_current_state():
 
 def test_toggle_side_only_touches_side():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
 
     def _call(ns):
         panelhider.PanelHiderPlugin._toggle_side_panel(ns)
@@ -195,7 +197,7 @@ def test_toggle_side_only_touches_side():
 
 def test_toggle_prefers_menu_action():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     action = _FakeAction(active=True)
     ns = _ns_with_actions({"ViewBottomPane": action})
     fake = _FakeSettings()
@@ -213,7 +215,7 @@ def test_toggle_prefers_menu_action():
 
 def test_hide_all_drives_both_actions():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     side = _FakeAction(active=True)
     bottom = _FakeAction(active=True)
     ns = _ns_with_actions({"ViewSidePane": side, "ViewBottomPane": bottom})
@@ -224,7 +226,7 @@ def test_hide_all_drives_both_actions():
 
 def test_missing_action_falls_back():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     ns = _plugin_ns()
     ns.window = types.SimpleNamespace(get_ui_manager=lambda: None)
 
@@ -237,7 +239,7 @@ def test_missing_action_falls_back():
 
 def test_bottom_collapsed_at_max_restores():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     widget = _FakeWidget(visible=True, effective=True)
     paned = _FakePaned(2147483647, max_position=2147483647, child2=widget)
     ns, saved = _ns_with_paned(widget, paned)
@@ -250,7 +252,7 @@ def test_bottom_collapsed_at_max_restores():
 
 def test_bottom_at_zero_restores():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     widget = _FakeWidget(visible=True, effective=True)
     paned = _FakePaned(0, max_position=1000, child2=widget)
     ns, saved = _ns_with_paned(widget, paned)
@@ -263,7 +265,7 @@ def test_bottom_at_zero_restores():
 
 def test_sane_pane_size_untouched():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     widget = _FakeWidget(visible=True, effective=True)
     paned = _FakePaned(500, max_position=1000, child2=widget)
     ns, saved = _ns_with_paned(widget, paned)
@@ -276,7 +278,7 @@ def test_sane_pane_size_untouched():
 
 def test_side_collapsed_at_zero_restores():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     widget = _FakeWidget(visible=True, effective=True)
     paned = _FakePaned(0, max_position=900, child1=widget)
     ns = _plugin_ns()
@@ -296,7 +298,7 @@ def test_side_collapsed_at_zero_restores():
 
 def test_set_panes_updates_widget_live_and_persists():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     side = _FakeWidget(visible=True)
     bottom = _FakeWidget(visible=True)
     window = types.SimpleNamespace(
@@ -325,7 +327,7 @@ def test_set_panes_updates_widget_live_and_persists():
 
 def test_toggle_reads_effective_visibility():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     bottom = _FakeWidget(visible=True, effective=False)
     window = types.SimpleNamespace(
         get_side_panel=lambda: (_ for _ in ()).throw(AssertionError("unused")),
@@ -348,7 +350,7 @@ def test_toggle_reads_effective_visibility():
 
 def test_global_keys_dispatch_actions():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     called: list[str] = []
     ns = _plugin_ns()
     ns._hide_all_panels = lambda: called.append("hide")
@@ -362,7 +364,7 @@ def test_global_keys_dispatch_actions():
 
 def test_global_keys_reject_wrong_modifiers():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     ns = _plugin_ns()
     assert ns._handle_global_key("b", False, False, False) is False
     assert ns._handle_global_key("b", True, True, False) is False
@@ -372,15 +374,14 @@ def test_global_keys_reject_wrong_modifiers():
 
 def test_window_key_press_drives_handler():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     try:
         import gi
 
         gi.require_version("Gdk", "3.0")
         from gi.repository import Gdk
     except Exception as e:
-        print(f"SKIP panel-hider key test ({e})")
-        return
+        pytest.skip(f"no Gdk ({e})")
     ns = _plugin_ns()
     called: list[str] = []
     ns._handle_global_key = lambda *args: (called.append(args[0]), True)[1]

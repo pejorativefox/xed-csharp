@@ -5,6 +5,8 @@ import sys
 import tempfile
 import types
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "project-mode"))
 
 import projectmode
@@ -88,8 +90,7 @@ def test_working_tree_refresh_bypasses_storm_gate():
     import time
 
     if not hasattr(projectmode, "ProjectBrowser"):
-        print("SKIP (no Gtk)")
-        return
+        pytest.skip("no Gtk")
     saved_glib = projectmode.GLib
     timers = []
     projectmode.GLib = types.SimpleNamespace(
@@ -126,8 +127,7 @@ def test_working_tree_refresh_bypasses_storm_gate():
 
 def test_git_timer_preserves_interval_through_fire():
     if not hasattr(projectmode, "ProjectBrowser"):
-        print("SKIP (no Gtk)")
-        return
+        pytest.skip("no Gtk")
     saved_glib = projectmode.GLib
     projectmode.GLib = types.SimpleNamespace(
         timeout_add=lambda ms, cb, *a: 7,

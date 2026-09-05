@@ -4,6 +4,8 @@ import os
 import sys
 import types
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "feature-toggle"))
 
 import featuretoggle
@@ -51,7 +53,7 @@ def _ns(window, setting=True):
 
 def test_closes_lone_untouched_doc():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     window = _Window([_Doc(untouched=True)])
     featuretoggle.FeatureTogglePlugin._close_untouched_starter_doc(_ns(window))
     assert window.closed == [window._tab]
@@ -59,7 +61,7 @@ def test_closes_lone_untouched_doc():
 
 def test_keeps_touched_doc():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     window = _Window([_Doc(untouched=False)])
     featuretoggle.FeatureTogglePlugin._close_untouched_starter_doc(_ns(window))
     assert window.closed == []
@@ -67,7 +69,7 @@ def test_keeps_touched_doc():
 
 def test_keeps_doc_with_location():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
 
     class _Located(_Doc):
         def get_location(self):
@@ -83,7 +85,7 @@ def test_keeps_doc_with_location():
 
 def test_keeps_multiple_docs():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     window = _Window([_Doc(untouched=True), _Doc(untouched=True)])
     featuretoggle.FeatureTogglePlugin._close_untouched_starter_doc(_ns(window))
     assert window.closed == []
@@ -91,7 +93,7 @@ def test_keeps_multiple_docs():
 
 def test_respects_setting_off():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
     window = _Window([_Doc(untouched=True)])
     featuretoggle.FeatureTogglePlugin._close_untouched_starter_doc(_ns(window, setting=False))
     assert window.closed == []
@@ -99,7 +101,7 @@ def test_respects_setting_off():
 
 def test_close_failure_is_silent():
     if not HAVE_PLUGIN:
-        return
+        pytest.skip("plugin not available")
 
     class _FailWindow(_Window):
         def close_tab(self, tab):

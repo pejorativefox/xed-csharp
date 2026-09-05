@@ -6,6 +6,8 @@ import sys
 import tempfile
 import types
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "fuzzy-finder"))
 
 from fuzzyfinder import files as files_mod
@@ -150,7 +152,7 @@ def test_list_files_skips_hidden_pruned_and_links():
 
 def test_list_files_respects_gitignore():
     if shutil.which("git") is None:
-        return
+        pytest.skip("no git")
     with tempfile.TemporaryDirectory() as tmp:
         _touch(os.path.join(tmp, "Keep.cs"))
         _touch(os.path.join(tmp, "Skip.log"))
@@ -316,11 +318,11 @@ def test_entry_ctrl_n_p_and_paging():
     import fuzzyfinder
 
     if fuzzyfinder.Gtk is None or fuzzyfinder.Gdk is None:
-        return
+        pytest.skip("no Gtk/Gdk")
     try:
         dialog = fuzzyfinder.FuzzyFinderDialog(parent=None)
-    except Exception:
-        return  # no display: cannot build widgets headless
+    except Exception as e:
+        pytest.skip(f"no display: {e}")
     try:
         items = [(f"file{i:02d}.txt", f"/root/file{i:02d}.txt") for i in range(30)]
         dialog.set_files(items)

@@ -6,6 +6,8 @@ import subprocess
 import sys
 import tempfile
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "project-mode"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "project-mode", "projectmode"))
 
@@ -85,7 +87,7 @@ def test_color_for_path_unknown_is_none():
 
 def test_get_git_statuses_real_repo():
     if not _has_git():
-        return
+        pytest.skip("no git")
     with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(["git", "init"], cwd=tmp, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -129,7 +131,7 @@ def test_find_git_root_none_outside_repo():
 
 def test_find_git_root_inside_repo():
     if not _has_git():
-        return
+        pytest.skip("no git")
     with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(["git", "init"], cwd=tmp, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
