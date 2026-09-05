@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 
 import pytest
 
@@ -98,6 +99,47 @@ def test_untracked_marks():
     assert diffparse.untracked_marks(3) == {"added": [0, 1, 2], "modified": [], "deleted": []}
     assert diffparse.untracked_marks(0)["added"] == []
 
+def test_untracked_marks_caps_large_file():
+    assert diffparse.untracked_marks(5000)["added"] == list(range(2000))
+
+def test_buffer_diff_staged_new_yields_added():
+    if not _has_git():
+        pytest.skip("no git")
+    with tempfile.TemporaryDirectory() as tmp:
+        _init_repo(tmp)
+        with open(os.path.join(tmp, "new.txt"), "w") as f:
+            f.write("a\nb\nc\n")
+        subprocess.run(["git", "add", "new.txt"], cwd=tmp, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        text = diffparse.get_buffer_diff_text(tmp, "new.txt", "a\nb\nc\nd\n")
+        assert diffparse.parse_unified_diff(text)["added"] == [0, 1, 2, 3]
+
+
+def test_refresh_path_skips_spawn_while_in_flight():
+    plugin = _plugin()
+    plugin._generations = {"/tmp/x.cs": 1}
+    plugin._in_flight = {"/tmp/x.cs"}
+    plugin._snapshot_doc = lambda path: {"modified": False, "line_count": 1, "text": None}  # type: ignore[method-assign]
+    spawned = []
+    real_thread = threading.Thread
+
+    class _FakeThread:
+        def __init__(self, target=None, args=(), daemon=None):
+            spawned.append(args)
+
+        def start(self):
+            pass
+
+    threading.Thread = _FakeThread  # type: ignore[assignment]
+    try:
+        plugin.refresh_path("/tmp/x.cs")
+        assert spawned == []
+        plugin._in_flight = set()
+        plugin.refresh_path("/tmp/x.cs")
+        assert len(spawned) == 1
+    finally:
+        threading.Thread = real_thread  # type: ignore[assignment]
+
 
 def test_status_and_diff_real_repo():
     if not _has_git():
@@ -162,6 +204,37 @@ def test_color_pixbuf_is_small_solid_square():
     assert pixbuf.get_has_alpha() is True
     assert gitinline.color_pixbuf("bogus") is None
 
+def test_mark_colors_single_sourced_from_diffparse():
+    assert gitinline._MARK_COLORS == (
+        (diffparse.CATEGORY_ADDED, diffparse.COLOR_ADDED),
+        (diffparse.CATEGORY_MODIFIED, diffparse.COLOR_MODIFIED),
+        (diffparse.CATEGORY_DELETED, diffparse.COLOR_DELETED),
+    )
+
+
+def test_deleted_pixbuf_is_transparent_cornered_triangle():
+    assert gitinline.deleted_pixbuf("bogus") is None
+    pixbuf = gitinline.deleted_pixbuf(diffparse.COLOR_DELETED)
+    if gitinline.GdkPixbuf is None:
+        assert pixbuf is None
+        pytest.skip("no GdkPixbuf")
+    assert pixbuf.get_width() == gitinline._MARK_ICON_SIZE
+    assert pixbuf.get_height() == gitinline._MARK_ICON_SIZE
+
+    def alpha(x, y):
+        pixels = pixbuf.get_pixels()
+        stride = pixbuf.get_rowstride()
+        return pixels[y * stride + x * 4 + 3]
+
+    size = gitinline._MARK_ICON_SIZE
+    assert alpha(size // 2, 0) == 255
+    assert alpha(0, size - 1) == 0
+    assert alpha(size - 1, size - 1) == 0
+    opaque = sum(
+        1 for y in range(size) for x in range(size) if alpha(x, y) == 255
+    )
+    assert 0 < opaque < size * size
+
 
 def test_configure_marks_never_sets_line_background():
     import inspect
@@ -190,7 +263,7 @@ def test_buffer_diff_tracks_unsaved_edits():
         )
         assert 1 in hunks["modified"]
         assert 3 in hunks["added"]
-        assert diffparse.get_buffer_diff_text(tmp, "missing.txt", "x\n") == ""
+        assert diffparse.parse_unified_diff(diffparse.get_buffer_diff_text(tmp, "missing.txt", "x\n"))["added"] == [0]
         assert diffparse.get_buffer_diff_text(tmp, "f.txt", "one\ntwo\nthree\n") == ""
 
 
@@ -256,6 +329,9 @@ def _plugin():
     plugin._debounce_timer = None
     plugin._pending_paths = set()
     plugin._doc_handlers = {}
+    plugin._in_flight = set()
+    plugin._git_monitors = []
+    plugin._root_monitors = {}
     return plugin
 
 

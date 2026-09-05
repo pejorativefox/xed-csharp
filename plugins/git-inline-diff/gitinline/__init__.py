@@ -173,11 +173,21 @@ except Exception:
 
 _GTKSOURCE_AVAILABLE = GtkSource is not None
 
-_MARK_COLORS = (
-    ("gitinline-added", "#73C991"),
-    ("gitinline-modified", "#E2C08D"),
-    ("gitinline-deleted", "#C74E39"),
-)
+try:
+    if _diffparse is not None:
+        _MARK_COLORS = (
+            (_diffparse.CATEGORY_ADDED, _diffparse.COLOR_ADDED),
+            (_diffparse.CATEGORY_MODIFIED, _diffparse.COLOR_MODIFIED),
+            (_diffparse.CATEGORY_DELETED, _diffparse.COLOR_DELETED),
+        )
+    else:
+        raise AttributeError("_diffparse missing")
+except Exception:
+    _MARK_COLORS = (
+        ("gitinline-added", "#73C991"),
+        ("gitinline-modified", "#E2C08D"),
+        ("gitinline-deleted", "#C74E39"),
+    )
 
 #: Gutter icon size in px. Deliberately small: the pixbuf renders only in
 #: the marks gutter, leaving the text area untouched.
@@ -216,6 +226,72 @@ def color_pixbuf(color: str, size: int = _MARK_ICON_SIZE):
         _debug(f"gutter pixbuf failed: {e!r}")
         return None
 
+def deleted_pixbuf(color: str, size: int = _MARK_ICON_SIZE):
+    """Downward-triangle pixbuf for deleted-line marks, or None (soft-only).
+
+    Same gutter-only rendering as color_pixbuf; the triangle sets deleted
+    marks apart from the solid added/modified squares. Falls back to
+    color_pixbuf when cairo or GdkPixbuf is unavailable.
+    """
+    if GdkPixbuf is None:
+        return None
+    if rgba_pixel(color) is None:
+        return None
+    try:
+        import cairo  # type: ignore
+
+        from gi.repository import GdkPixbuf as _Pb  # type: ignore
+
+        text = color.strip().lstrip("#")
+        red = int(text[0:2], 16) / 255.0
+        green = int(text[2:4], 16) / 255.0
+        blue = int(text[4:6], 16) / 255.0
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
+        ctx = cairo.Context(surface)
+        ctx.set_operator(cairo.OPERATOR_SOURCE)
+        ctx.set_source_rgba(0, 0, 0, 0)
+        ctx.paint()
+        ctx.set_operator(cairo.OPERATOR_OVER)
+        ctx.set_source_rgba(red, green, blue, 1.0)
+        ctx.move_to(0, 0)
+        ctx.line_to(size, 0)
+        ctx.line_to(size / 2.0, size)
+        ctx.close_path()
+        ctx.fill()
+        surface.flush()
+        stride = surface.get_stride()
+        raw = bytes(surface.get_data())
+        # cairo ARGB32 is premultiplied, byte order B,G,R,A (LE):
+        # unpremultiply + swizzle to GdkPixbuf's straight RGBA.
+        out = bytearray(len(raw))
+        for i in range(0, len(raw), 4):
+            b, g, r, a = raw[i], raw[i + 1], raw[i + 2], raw[i + 3]
+            if a == 0:
+                continue
+            if a == 255:
+                out[i], out[i + 1], out[i + 2], out[i + 3] = r, g, b, a
+            else:
+                out[i] = min(255, (r * 255 + a // 2) // a)
+                out[i + 1] = min(255, (g * 255 + a // 2) // a)
+                out[i + 2] = min(255, (b * 255 + a // 2) // a)
+                out[i + 3] = a
+        data = bytes(out)
+        pixbuf = _Pb.Pixbuf.new_from_data(
+            data, _Pb.Colorspace.RGB, True, 8, size, size, stride
+        )
+        # new_from_data references (not copies) the bytes: keep alive.
+        try:
+            pixbuf._owned_data = data  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        return pixbuf
+    except Exception as e:
+        _debug(f"deleted pixbuf failed: {e!r}")
+        try:
+            return color_pixbuf(color, size)
+        except Exception:
+            return None
+
 
 class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[misc]
     __gtype_name__ = "XedGitInlineDiffPlugin"
@@ -231,6 +307,9 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
         self._debounce_timer = None
         self._pending_paths: set = set()
         self._doc_handlers: dict = {}
+        self._in_flight: set = set()
+        self._git_monitors: list = []
+        self._root_monitors: dict = {}
 
     # -- lifecycle ---------------------------------------------------
     def do_activate(self) -> None:
@@ -251,6 +330,45 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
         self._schedule_active()
 
     def do_deactivate(self) -> None:
+        try:
+            dp = _diffparse
+            categories = (
+                (dp.CATEGORY_ADDED, dp.CATEGORY_MODIFIED, dp.CATEGORY_DELETED)
+                if dp is not None
+                else ()
+            )
+            for path in list(self._generations):
+                try:
+                    doc = self._find_doc(path)
+                except Exception:
+                    doc = None
+                if doc is None:
+                    continue
+                try:
+                    start, end = doc.get_bounds()
+                except Exception:
+                    continue
+                for category in categories:
+                    try:
+                        doc.remove_source_marks(start, end, category)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        try:
+            for monitor in list(getattr(self, "_git_monitors", [])):
+                try:
+                    monitor.cancel()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            self._git_monitors = []
+            self._root_monitors = {}
+            self._in_flight = set()
+        except Exception:
+            pass
         try:
             self._generations.clear()
             self._pending_paths.clear()
@@ -312,6 +430,12 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
                 self._generations.pop(path, None)
             except Exception:
                 pass
+        try:
+            views = self.window.get_views()
+            live = {id(v) for v in views}
+            self._mark_views_configured = set(self._mark_views_configured) & live
+        except Exception:
+            pass
 
     def _on_active_tab_changed(self, window, *_args) -> None:
         self._schedule_active()
@@ -441,10 +565,52 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
             self.refresh_path(path)
         return False
 
+    def _monitor_root(self, root: str) -> None:
+        """Watch .git/HEAD + .git/index for external changes (soft-only)."""
+        try:
+            if not root or root in self._root_monitors:
+                return
+            if Gio is None:
+                return
+            monitors = []
+            for name in ("HEAD", "index"):
+                try:
+                    watched = Gio.File.new_for_path(os.path.join(root, ".git", name))
+                    monitor = watched.monitor_file(Gio.FileMonitorFlags.NONE, None)
+                    monitor.connect("changed", self._on_git_dir_changed)
+                    monitors.append(monitor)
+                except Exception as e:
+                    _debug(f"git monitor {name} failed: {e!r}")
+            if monitors:
+                self._root_monitors[root] = monitors
+                self._git_monitors.extend(monitors)
+        except Exception as e:
+            _debug(f"git monitor setup failed: {e!r}")
+
+    def _on_git_dir_changed(self, *args) -> None:
+        try:
+            paths = list(self._generations)
+        except Exception:
+            return
+        if not paths:
+            return
+        try:
+            self._schedule_paths(paths)
+        except Exception as e:
+            _debug(f"git change refresh failed: {e!r}")
+
     def refresh_path(self, path: str) -> None:
         """Re-query git for one file off the UI thread, then repaint."""
         if _diffparse is None or not path:
             return
+        try:
+            in_flight = self._in_flight
+        except AttributeError:
+            in_flight = None
+        if in_flight is not None and path in in_flight:
+            return
+        if in_flight is not None:
+            in_flight.add(path)
         generation = self._generations.get(path, 0)
         snapshot = self._snapshot_doc(path)
         try:
@@ -456,6 +622,11 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
             thread.start()
         except Exception as e:
             _debug(f"refresh spawn failed: {e!r}")
+            try:
+                if in_flight is not None:
+                    in_flight.discard(path)
+            except Exception:
+                pass
 
     def _snapshot_doc(self, path: str):
         """UI-thread snapshot: buffer text when dirty, else just a line count.
@@ -498,18 +669,36 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
         result: dict = {"added": [], "modified": [], "deleted": []}
         try:
             folder = os.path.dirname(path)
-            root = dp.find_git_root(folder)
+            try:
+                root = dp._cached_git_root(folder)  # type: ignore[attr-defined]
+            except AttributeError:
+                root = dp.find_git_root(folder)
+            current = self._generations.get(path, generation)
+            if generation != current:
+                return
+            if root is not None and GLib is not None:
+                try:
+                    GLib.idle_add(self._monitor_root, root)
+                except Exception:
+                    pass
             if root is not None:
                 status = dp.file_status_short(root, path)
+                current = self._generations.get(path, generation)
+                if generation != current:
+                    return
                 if status == "??":
                     result = dp.untracked_marks(line_count)
                 elif status:
                     relpath = os.path.relpath(path, root)
+                    matches = dp.buffer_matches_head(root, relpath, snapshot["text"]) if (isinstance(snapshot, dict) and snapshot.get("modified") and snapshot.get("text") is not None) else True
+                    current = self._generations.get(path, generation)
+                    if generation != current:
+                        return
                     use_buffer = (
                         isinstance(snapshot, dict)
                         and snapshot.get("modified")
                         and snapshot.get("text") is not None
-                        and not dp.buffer_matches_head(root, relpath, snapshot["text"])
+                        and not matches
                     )
                     if use_buffer:
                         text = dp.get_buffer_diff_text(root, relpath, snapshot["text"])
@@ -524,6 +713,11 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
         except Exception as e:
             _debug(f"git diff failed for {path}: {e!r}")
             result = {"added": [], "modified": [], "deleted": []}
+        finally:
+            try:
+                self._in_flight.discard(path)
+            except Exception:
+                pass
         try:
             if GLib is not None:
                 GLib.idle_add(self._apply_result, path, result, generation)
@@ -610,20 +804,27 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
             try:
                 if view.get_buffer() is not doc:
                     continue
-                if hash(view) in self._mark_views_configured:
+                if id(view) in self._mark_views_configured:
                     continue
                 view.set_show_line_marks(True)
+                try:
+                    deleted_category = _diffparse.CATEGORY_DELETED
+                except Exception:
+                    deleted_category = "gitinline-deleted"
                 for category, color in _MARK_COLORS:
                     try:
                         attrs = GtkSource.MarkAttributes()
                         # Gutter icon only: painting the line background is
                         # deliberately never used here (it washes out text).
-                        pixbuf = color_pixbuf(color)
+                        if category == deleted_category:
+                            pixbuf = deleted_pixbuf(color)
+                        else:
+                            pixbuf = color_pixbuf(color)
                         if pixbuf is not None:
                             attrs.set_pixbuf(pixbuf)
                         view.set_mark_attributes(category, attrs, 10)
                     except Exception as e:
                         _debug(f"mark attributes {category} failed: {e!r}")
-                self._mark_views_configured.add(hash(view))
+                self._mark_views_configured.add(id(view))
             except Exception:
                 continue

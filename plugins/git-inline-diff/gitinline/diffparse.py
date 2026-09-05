@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 
 GIT_TIMEOUT_S = 10
 
@@ -64,6 +65,36 @@ def find_git_root(folder: str, timeout: int = 5) -> str | None:
             current = parent
     except Exception:
         return None
+
+_GIT_ROOT_CACHE: dict[str, tuple[float, str | None]] = {}
+
+
+def _cached_git_root(folder: str) -> str | None:
+    """Cached find_git_root (5 s TTL, soft-only)."""
+    try:
+        key = os.path.abspath(folder)
+    except Exception:
+        return None
+    try:
+        now = time.monotonic()
+    except Exception:
+        return find_git_root(folder)
+    try:
+        hit = _GIT_ROOT_CACHE.get(key)
+        if hit is not None and (now - hit[0]) < 5.0:
+            return hit[1]
+    except Exception:
+        pass
+    result = find_git_root(folder)
+    try:
+        if len(_GIT_ROOT_CACHE) > 128:
+            for old_key, (stamp, _val) in list(_GIT_ROOT_CACHE.items()):
+                if (now - stamp) > 60.0:
+                    _GIT_ROOT_CACHE.pop(old_key, None)
+        _GIT_ROOT_CACHE[key] = (now, result)
+    except Exception:
+        pass
+    return result
 
 
 def file_status_short(repo_root: str, path: str, timeout: int = GIT_TIMEOUT_S) -> str:
@@ -173,7 +204,51 @@ def get_buffer_diff_text(
     except Exception:
         return ""
     if old.returncode != 0:
-        return ""
+        # Staged-new / renamed-not-in-HEAD: no HEAD blob to diff against.
+        # Fall back to a full-file addition diff (/dev/null vs buffer).
+        try:
+            new_bytes = new_text.encode("utf-8", "replace")
+        except Exception:
+            return ""
+        tmpdir = None
+        proc = None
+        try:
+            tmpdir = tempfile.mkdtemp(prefix="xed-gutter-")
+            new_path = os.path.join(tmpdir, "new")
+            with open(new_path, "wb") as f:
+                f.write(new_bytes)
+            proc = subprocess.run(
+                [
+                    "git",
+                    "diff",
+                    "--no-index",
+                    "--no-color",
+                    "--no-ext-diff",
+                    "-U0",
+                    "--",
+                    "/dev/null",
+                    new_path,
+                ],
+                cwd=repo_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout,
+                check=False,
+            )
+        except Exception:
+            return ""
+        finally:
+            try:
+                if tmpdir is not None:
+                    shutil.rmtree(tmpdir, ignore_errors=True)
+            except Exception:
+                pass
+        if proc is None or proc.returncode not in (0, 1):
+            return ""
+        try:
+            return (proc.stdout or b"").decode("utf-8", "surrogateescape")
+        except Exception:
+            return ""
     try:
         new_bytes = new_text.encode("utf-8", "replace")
     except Exception:
@@ -287,15 +362,20 @@ def clamp_lines(lines: list[int], line_count: int) -> list[int]:
     out.sort()
     return out
 
-
-def untracked_marks(line_count: int) -> dict[str, list[int]]:
+def untracked_marks(line_count: int, cap: int = 2000) -> dict[str, list[int]]:
     """Marks for a file not yet in git: every line counts as added."""
     try:
         count = int(line_count)
     except Exception:
         count = 0
+    try:
+        limit = int(cap)
+    except Exception:
+        limit = 2000
+    count = max(0, count)
+    limit = max(0, limit)
     return {
-        "added": list(range(max(0, count))),
+        "added": list(range(min(count, limit))),
         "modified": [],
         "deleted": [],
     }
