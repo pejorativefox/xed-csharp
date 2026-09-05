@@ -372,17 +372,11 @@ if Gtk is not None:
             self._monitors: list = []
             self._refresh_timer = None
 
-            toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-            choose = Gtk.Button.new_with_label("Open Folder")
-            choose.connect("clicked", lambda _b: self.emit("choose-root"))
-            refresh = Gtk.Button.new_with_label("Refresh")
-            refresh.connect("clicked", lambda _b: self.refresh_git_statuses())
+            header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
             self._root_label = Gtk.Label(label="No folder selected")
             self._root_label.set_xalign(0.0)
-            toolbar.pack_start(choose, False, False, 0)
-            toolbar.pack_start(refresh, False, False, 0)
-            toolbar.pack_start(self._root_label, True, True, 0)
-            self.pack_start(toolbar, False, False, 0)
+            header.pack_start(self._root_label, True, True, 0)
+            self.pack_start(header, False, False, 0)
 
             self.store = Gtk.TreeStore(str, str, str, str, str)
             self.tree = Gtk.TreeView.new_with_model(self.store)
@@ -422,7 +416,7 @@ if Gtk is not None:
                 self._root_label.set_text("No folder selected")
                 return
             base = os.path.basename(folder.rstrip(os.sep)) or folder
-            self._root_label.set_text(folder)
+            self._root_label.set_text(base)
             root_iter = self.store.append(
                 None,
                 [_TREE_FOLDER_ICON, base + "/", folder, "folder", None],
