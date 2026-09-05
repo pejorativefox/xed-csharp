@@ -1,0 +1,83 @@
+#!/usr/bin/env python3
+"""Open locations in xed: file.cs[:line[:col]] or file.cs(line[,col]).
+
+Meant as the command behind clickable terminal links, e.g. point your
+terminal's custom hyperlink matcher at::
+
+    xed-open %s
+
+or call it directly::
+
+    xed-open source/CoreForge/ScenePresets.cs:25
+    xed-open "source/CoreForge/ScenePresets.cs(25, 17)"
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+
+USAGE = "usage: xed-open 'path/to/file.cs[:line[:col]]' [...]"
+
+
+def parse_location(text: str) -> tuple[str, int | None, int | None]:
+    """Split a location string into (path, line, col); line/col are 1-based."""
+    cleaned = (text or "").strip().strip("'\"")
+    match = re.match(r"^(.*?)\((\d+)(?:[,:](\d+))?\)\s*$", cleaned)
+    if match:
+        path, line, col = match.group(1), match.group(2), match.group(3)
+    else:
+        match = re.match(r"^(.*?):(\d+)(?::(\d+))?\s*$", cleaned)
+        if not match:
+            return cleaned, None, None
+        path, line, col = match.group(1), match.group(2), match.group(3)
+    try:
+        line_no = max(1, int(line)) if line else None
+    except (TypeError, ValueError):
+        line_no = None
+    try:
+        col_no = max(1, int(col)) if col else None
+    except (TypeError, ValueError):
+        col_no = None
+    return path.strip(), line_no, col_no
+
+
+def open_location(path: str, line: int | None) -> int:
+    """Open path in (the running) xed, jumping to line. Returns exit code."""
+    if not path:
+        print("xed-open: empty path", file=sys.stderr)
+        return 2
+    if not os.path.isfile(path):
+        print(f"xed-open: not found: {path}", file=sys.stderr)
+        return 2
+    argv = ["xed"]
+    if line:
+        argv.append(f"+{line}")
+    argv.append(path)
+    try:
+        subprocess.run(argv, check=False)
+    except FileNotFoundError:
+        print("xed-open: xed not on PATH", file=sys.stderr)
+        return 127
+    except OSError as exc:
+        print(f"xed-open: failed to launch xed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) < 2 or argv[1] in ("-h", "--help"):
+        print(USAGE)
+        return 0 if len(argv) > 1 else 2
+    code = 0
+    for arg in argv[1:]:
+        path, line, _col = parse_location(arg)
+        result = open_location(path, line)
+        code = code or result
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
