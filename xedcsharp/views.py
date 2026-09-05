@@ -120,6 +120,7 @@ class ViewTracker(GObject.Object):
         ),
         "launch-debug": (GObject.SignalFlags.RUN_LAST, None, ()),
         "fuzzy-finder": (GObject.SignalFlags.RUN_LAST, None, ()),
+        "open-folder": (GObject.SignalFlags.RUN_LAST, None, ()),
     }
 
     def __init__(self) -> None:
@@ -300,6 +301,11 @@ class ViewTracker(GObject.Object):
             # Quick-open fuzzy finder in every file type (clobbers Print).
             debug("key: Ctrl+P fuzzy-finder (all file types)")
             self.emit("fuzzy-finder")
+            return True
+        if ctrl and shift and not alt and keyname.lower() == "o":
+            # Open a folder containing a solution (all file types).
+            debug("key: Ctrl+Shift+O open-folder (all file types)")
+            self.emit("open-folder")
             return True
         if not is_csharp_doc(doc):
             return False

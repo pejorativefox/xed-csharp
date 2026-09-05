@@ -371,6 +371,7 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         self._completion_warned = ""
         self._solution_files: list[str] = []
         self._hidden_docs = None
+        self._workspace_override: str | None = None
 
     # -- activation --------------------------------------------------
     def do_activate(self) -> None:
@@ -435,6 +436,7 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             self._connect(self.tracker, "toggle-breakpoint", lambda _w, p, l: self._toggle_breakpoint(p, l))
             self._connect(self.tracker, "launch-debug", lambda _w: self._debug_project(None))
             self._connect(self.tracker, "fuzzy-finder", lambda _w: self._show_fuzzy_finder())
+            self._connect(self.tracker, "open-folder", lambda _w: self._open_solution_folder())
             try:
                 self.tracker.attach(self.window)
             except Exception as e:
@@ -730,7 +732,13 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             except Exception:
                 pass
         active = self._active_path()
-        start = active or self._open_doc_dir() or self._startup_dir() or os.path.expanduser("~")
+        start = (
+            self._workspace_override
+            or active
+            or self._open_doc_dir()
+            or self._startup_dir()
+            or os.path.expanduser("~")
+        )
         try:
             cwd = os.getcwd()
         except Exception:
@@ -1561,6 +1569,71 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
 
     def _open_file(self, path: str) -> None:
         self._jump_to(path, 0, 0)
+
+    def _open_solution_folder(self) -> None:
+        try:
+            dialog = Gtk.FileChooserDialog(
+                title="Open Solution Folder",
+                action=Gtk.FileChooserAction.SELECT_FOLDER,
+            )
+            try:
+                dialog.set_transient_for(self.window)
+                dialog.set_modal(True)
+            except Exception as e:
+                debug(f"folder chooser transient failed: {e!r}")
+            dialog.add_buttons(
+                "_Cancel", Gtk.ResponseType.CANCEL,
+                "_Open", Gtk.ResponseType.ACCEPT,
+            )
+        except Exception as e:
+            debug(f"folder chooser create failed: {e!r}")
+            return
+        try:
+            folder = dialog.get_filename() if dialog.run() == Gtk.ResponseType.ACCEPT else None
+        except Exception as e:
+            debug(f"folder chooser failed: {e!r}")
+            folder = None
+        finally:
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+        if not folder:
+            return
+        sln = solution_mod.find_solution(folder)
+        if sln is None:
+            message = f"No .sln/.slnx found under {folder}"
+            try:
+                error(message)
+            except Exception:
+                pass
+            if self.output is not None:
+                self.output.append(message + "\n")
+                self.output.set_status(message)
+            return
+        self._workspace_override = os.path.dirname(sln)
+        debug(f"workspace override -> {self._workspace_override}")
+        self._schedule_refresh()
+        first_cs = self._first_cs_under(os.path.dirname(sln))
+        if first_cs:
+            self._jump_to(first_cs, 0, 0)
+        elif self.output is not None:
+            self.output.set_status(f"{os.path.basename(sln)} selected — no .cs files found.")
+
+    @staticmethod
+    def _first_cs_under(root: str) -> str | None:
+        try:
+            nodes = solution_mod.project_tree(root)
+        except Exception:
+            return None
+        stack = list(nodes)
+        while stack:
+            node = stack.pop(0)
+            if node.is_dir:
+                stack = list(node.children) + stack
+            elif node.path.endswith(".cs"):
+                return node.path
+        return None
 
     def _show_fuzzy_finder(self) -> None:
         files = list(getattr(self, "_solution_files", None) or [])

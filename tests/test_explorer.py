@@ -61,12 +61,48 @@ def test_collapsed_on_first_load_only():
         model = _model(tmp)
         explorer = SolutionExplorer()
         explorer.set_model(model)
+        assert explorer.tree.row_expanded(Gtk.TreePath.new_from_indices([0]))
         assert not _expanded(explorer, Gtk)
-        explorer.tree.expand_row(Gtk.TreePath.new_from_indices([0]), False)
         explorer.tree.expand_row(Gtk.TreePath.new_from_indices([0, 0]), False)
         assert _expanded(explorer, Gtk)
         explorer.set_model(model)
         assert _expanded(explorer, Gtk)
+
+
+def _model_at(tmp, name):
+    from xedcsharp.solution import ProjectInfo, SolutionModel
+
+    proj_dir = os.path.join(tmp, name)
+    os.makedirs(proj_dir)
+    with open(os.path.join(proj_dir, "Top.cs"), "w") as f:
+        f.write("// x")
+    csproj = os.path.join(proj_dir, f"{name}.csproj")
+    with open(csproj, "w") as f:
+        f.write("<Project/>")
+    sln = os.path.join(tmp, f"{name}.sln")
+    with open(sln, "w") as f:
+        f.write("x")
+    model = SolutionModel(path=sln, root_dir=tmp)
+    model.projects.append(ProjectInfo(path=csproj, name=name))
+    return model
+
+
+def test_new_solution_resets_to_top_level():
+    if _GUI is None:
+        return
+    Gtk = _GUI
+    from xedcsharp.explorer import SolutionExplorer
+
+    with tempfile.TemporaryDirectory() as tmp:
+        first = _model_at(tmp, "One")
+        second = _model_at(tmp, "Two")
+        explorer = SolutionExplorer()
+        explorer.set_model(first)
+        explorer.tree.expand_row(Gtk.TreePath.new_from_indices([0, 0]), False)
+        assert _expanded(explorer, Gtk)
+        explorer.set_model(second)
+        assert explorer.tree.row_expanded(Gtk.TreePath.new_from_indices([0]))
+        assert not _expanded(explorer, Gtk)
 
 
 def test_double_click_keeps_expansion():

@@ -102,6 +102,13 @@ class SolutionExplorer(Gtk.Box):
         return out
 
     def set_model(self, model: SolutionModel) -> None:
+        try:
+            old_path = self._model.path if self._model else None
+            new_path = model.path if model else None
+            if old_path != new_path:
+                self._loaded = False
+        except Exception:
+            pass
         self._model = model
         keep_expanded = self._expanded_paths() if self._loaded else set()
         self.store.clear()
@@ -116,12 +123,17 @@ class SolutionExplorer(Gtk.Box):
                 self._append_tree(proj_iter, project_tree(os.path.dirname(project.path)))
             except Exception as e:
                 debug(f"explorer tree failed: {e!r}")
+        from gi.repository import Gtk as _Gtk
+
         if not self._loaded:
             self.tree.collapse_all()
             self._loaded = True
+            try:
+                if self.store.get_iter_first() is not None:
+                    self.tree.expand_row(_Gtk.TreePath.new_from_indices([0]), False)
+            except Exception:
+                pass
         else:
-            from gi.repository import Gtk as _Gtk
-
             for path in sorted(keep_expanded):
                 try:
                     self.tree.expand_row(_Gtk.TreePath.new_from_indices(list(path)), False)
