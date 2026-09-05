@@ -31,6 +31,10 @@ _PRUNE_DIRS = frozenset(
     }
 )
 
+_PANEL_ICONS = ("system-file-manager", "folder", "view-list-tree")
+_TREE_FOLDER_ICON = "folder"
+_TREE_FILE_ICON = "text-x-generic"
+
 
 def _ensure_xed_gi_paths() -> None:
     try:
@@ -91,6 +95,23 @@ def _debug(message: str) -> None:
         sys.stderr.flush()
     except Exception:
         pass
+
+
+def _pick_icon(candidates: tuple[str, ...]) -> str:
+    if Gtk is None:
+        return candidates[0]
+    try:
+        theme = Gtk.IconTheme.get_default()
+    except Exception:
+        theme = None
+    if theme is not None:
+        for name in candidates:
+            try:
+                if theme.has_icon(name):
+                    return name
+            except Exception:
+                continue
+    return candidates[0]
 
 
 @dataclass
@@ -182,9 +203,10 @@ if Gtk is not None:
         def __init__(self) -> None:
             super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
             self._root_dir = ""
-            self._col_label = 0
-            self._col_path = 1
-            self._col_kind = 2
+            self._col_icon = 0
+            self._col_label = 1
+            self._col_path = 2
+            self._col_kind = 3
 
             toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
             choose = Gtk.Button.new_with_label("Open Folder")
@@ -195,12 +217,15 @@ if Gtk is not None:
             toolbar.pack_start(self._root_label, True, True, 0)
             self.pack_start(toolbar, False, False, 0)
 
-            self.store = Gtk.TreeStore(str, str, str)
+            self.store = Gtk.TreeStore(str, str, str, str)
             self.tree = Gtk.TreeView.new_with_model(self.store)
             self.tree.set_headers_visible(False)
             col = Gtk.TreeViewColumn("Files")
+            icon = Gtk.CellRendererPixbuf()
             cell = Gtk.CellRendererText()
+            col.pack_start(icon, False)
             col.pack_start(cell, True)
+            col.add_attribute(icon, "icon-name", self._col_icon)
             col.add_attribute(cell, "text", self._col_label)
             self.tree.append_column(col)
             self.tree.connect("row-activated", self._on_row_activated)
@@ -219,7 +244,10 @@ if Gtk is not None:
                 return
             base = os.path.basename(folder.rstrip(os.sep)) or folder
             self._root_label.set_text(folder)
-            root_iter = self.store.append(None, [base + "/", folder, "folder"])
+            root_iter = self.store.append(
+                None,
+                [_TREE_FOLDER_ICON, base + "/", folder, "folder"],
+            )
             for node in build_file_tree(folder):
                 self._append_node(root_iter, node)
             try:
@@ -229,11 +257,14 @@ if Gtk is not None:
 
         def _append_node(self, parent, node: FileNode) -> None:
             if node.is_dir:
-                folder_iter = self.store.append(parent, [node.name + "/", node.path, "folder"])
+                folder_iter = self.store.append(
+                    parent,
+                    [_TREE_FOLDER_ICON, node.name + "/", node.path, "folder"],
+                )
                 for child in node.children:
                     self._append_node(folder_iter, child)
             else:
-                self.store.append(parent, [node.name, node.path, "file"])
+                self.store.append(parent, [_TREE_FILE_ICON, node.name, node.path, "file"])
 
         def _on_row_activated(self, _tree, path, _col) -> None:
             tree_iter = self.store.get_iter(path)
@@ -274,8 +305,9 @@ class ProjectModePlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
         side = self._safe(lambda: self.window.get_side_panel())
         if side is not None and self.browser is not None:
             added = False
+            panel_icon = _pick_icon(_PANEL_ICONS)
             for attempt in (
-                lambda: side.add_item(self.browser, "Project Mode", "view-list-tree"),
+                lambda: side.add_item(self.browser, "Project Mode", panel_icon),
                 lambda: side.add(self.browser),
             ):
                 try:
