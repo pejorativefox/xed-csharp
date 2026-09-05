@@ -3,8 +3,17 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
+
+try:
+    from . import gitstatus as _gitstatus
+except Exception:
+    try:
+        import gitstatus as _gitstatus  # type: ignore[no-redef]
+    except Exception:
+        _gitstatus = None  # type: ignore[assignment]
 
 _XED_LIBDIRS = (
     "/usr/lib64/xed",
@@ -343,17 +352,25 @@ if Gtk is not None:
             self._col_label = 1
             self._col_path = 2
             self._col_kind = 3
+            self._col_fg = 4
+            self._git_statuses: dict = {}
+            self._git_generation = 0
+            self._monitors: list = []
+            self._refresh_timer = None
 
             toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
             choose = Gtk.Button.new_with_label("Open Folder")
             choose.connect("clicked", lambda _b: self.emit("choose-root"))
+            refresh = Gtk.Button.new_with_label("Refresh")
+            refresh.connect("clicked", lambda _b: self.refresh_git_statuses())
             self._root_label = Gtk.Label(label="No folder selected")
             self._root_label.set_xalign(0.0)
             toolbar.pack_start(choose, False, False, 0)
+            toolbar.pack_start(refresh, False, False, 0)
             toolbar.pack_start(self._root_label, True, True, 0)
             self.pack_start(toolbar, False, False, 0)
 
-            self.store = Gtk.TreeStore(str, str, str, str)
+            self.store = Gtk.TreeStore(str, str, str, str, str)
             self.tree = Gtk.TreeView.new_with_model(self.store)
             self.tree.set_headers_visible(False)
             col = Gtk.TreeViewColumn("Files")
@@ -363,6 +380,7 @@ if Gtk is not None:
             col.pack_start(cell, True)
             col.add_attribute(icon, "icon-name", self._col_icon)
             col.add_attribute(cell, "text", self._col_label)
+            col.add_attribute(cell, "foreground", self._col_fg)
             self.tree.append_column(col)
             self.tree.connect("row-activated", self._on_row_activated)
 
@@ -373,7 +391,10 @@ if Gtk is not None:
             self.show_all()
 
         def set_root(self, folder: str) -> None:
+            self._git_generation += 1
+            self._cancel_monitors()
             self._root_dir = folder
+            self._git_statuses = {}
             self.store.clear()
             if not folder or not os.path.isdir(folder):
                 self._root_label.set_text("No folder selected")
@@ -382,25 +403,226 @@ if Gtk is not None:
             self._root_label.set_text(folder)
             root_iter = self.store.append(
                 None,
-                [_TREE_FOLDER_ICON, base + "/", folder, "folder"],
+                [_TREE_FOLDER_ICON, base + "/", folder, "folder", None],
             )
             for node in build_file_tree(folder):
-                self._append_node(root_iter, node)
+                self._append_node(root_iter, node, {})
             try:
                 self.tree.expand_row(Gtk.TreePath.new_from_indices([0]), False)
             except Exception:
                 pass
+            self._setup_git_monitors(folder)
+            self.refresh_git_statuses()
 
-        def _append_node(self, parent, node: FileNode) -> None:
+        def _append_node(self, parent, node: FileNode, statuses: dict | None = None) -> str | None:
+            gs = _gitstatus if _gitstatus is not None else None
+            if statuses is None:
+                statuses = self._git_statuses
             if node.is_dir:
+                child_colors: list = []
+                # Append first so children have a parent, then set the
+                # folder color once the subtree aggregate is known.
                 folder_iter = self.store.append(
                     parent,
-                    [_TREE_FOLDER_ICON, node.name + "/", node.path, "folder"],
+                    [_TREE_FOLDER_ICON, node.name + "/", node.path, "folder", None],
                 )
                 for child in node.children:
-                    self._append_node(folder_iter, child)
-            else:
-                self.store.append(parent, [_TREE_FILE_ICON, node.name, node.path, "file"])
+                    child_colors.append(self._append_node(folder_iter, child, statuses))
+                color = gs.aggregate_dir_color(child_colors) if gs is not None else None
+                try:
+                    self.store.set_value(folder_iter, self._col_fg, color)
+                except Exception:
+                    pass
+                return color
+            color = gs.color_for_path(statuses, node.path) if gs is not None else None
+            self.store.append(
+                parent, [_TREE_FILE_ICON, node.name, node.path, "file", color]
+            )
+            return color
+
+        # -- git -------------------------------------------------------
+        def refresh_git_statuses(self) -> None:
+            """Re-query `git status` off the UI thread, then repaint colors."""
+            root = self._root_dir
+            if not root or not os.path.isdir(root):
+                return
+            if _gitstatus is None:
+                return
+            self._git_generation += 1
+            generation = self._git_generation
+            try:
+                thread = threading.Thread(
+                    target=self._query_git_thread,
+                    args=(root, generation),
+                    daemon=True,
+                )
+                thread.start()
+            except Exception as e:
+                _debug(f"git refresh spawn failed: {e!r}")
+
+        def _query_git_thread(self, root: str, generation: int) -> None:
+            statuses: dict = {}
+            try:
+                git_root = _gitstatus.find_git_root(root)
+                if git_root:
+                    statuses = _gitstatus.get_git_statuses(git_root)
+            except Exception as e:
+                _debug(f"git status failed for {root}: {e!r}")
+                statuses = {}
+            try:
+                if GLib is not None:
+                    GLib.idle_add(self._apply_git_statuses, statuses, generation)
+                else:
+                    self._apply_git_statuses(statuses, generation)
+            except Exception as e:
+                _debug(f"git apply schedule failed: {e!r}")
+
+        def _apply_git_statuses(self, statuses: dict, generation: int) -> bool:
+            if generation != self._git_generation:
+                return False
+            self._git_statuses = statuses or {}
+            try:
+                root_iter = self.store.get_iter_first()
+            except Exception:
+                root_iter = None
+            if root_iter is None:
+                return False
+            try:
+                child = self.store.iter_children(root_iter)
+                colors: list = []
+                while child is not None:
+                    colors.append(self._recolor_subtree(child))
+                    try:
+                        child = self.store.iter_next(child)
+                    except Exception:
+                        break
+                gs = _gitstatus
+                root_color = gs.aggregate_dir_color(colors) if gs is not None else None
+                try:
+                    self.store.set_value(root_iter, self._col_fg, root_color)
+                except Exception:
+                    pass
+            except Exception as e:
+                _debug(f"git recolor failed: {e!r}")
+            return False
+
+        def _recolor_subtree(self, tree_iter) -> str | None:
+            gs = _gitstatus
+            try:
+                kind = self.store.get_value(tree_iter, self._col_kind)
+                path = self.store.get_value(tree_iter, self._col_path)
+            except Exception:
+                return None
+            if kind == "file":
+                color = gs.color_for_path(self._git_statuses, path) if gs is not None else None
+                try:
+                    self.store.set_value(tree_iter, self._col_fg, color)
+                except Exception:
+                    pass
+                return color
+            # Folder: recurse into children, then aggregate.
+            colors: list = []
+            try:
+                child = self.store.iter_children(tree_iter)
+            except Exception:
+                child = None
+            while child is not None:
+                colors.append(self._recolor_subtree(child))
+                try:
+                    child = self.store.iter_next(child)
+                except Exception:
+                    break
+            color = gs.aggregate_dir_color(colors) if gs is not None else None
+            try:
+                self.store.set_value(tree_iter, self._col_fg, color)
+            except Exception:
+                pass
+            return color
+
+        def _setup_git_monitors(self, folder: str) -> None:
+            if Gio is None:
+                return
+            try:
+                watched: list = []
+                dir_file = Gio.File.new_for_path(folder)
+                try:
+                    watched.append(
+                        dir_file.monitor_directory(Gio.FileMonitorFlags.NONE, None)
+                    )
+                except Exception as e:
+                    _debug(f"dir monitor failed for {folder}: {e!r}")
+                git_path = os.path.join(folder, ".git")
+                try:
+                    if os.path.isdir(git_path):
+                        watched.append(
+                            Gio.File.new_for_path(git_path).monitor_directory(
+                                Gio.FileMonitorFlags.NONE, None
+                            )
+                        )
+                    elif os.path.isfile(git_path):
+                        watched.append(
+                            Gio.File.new_for_path(git_path).monitor_file(
+                                Gio.FileMonitorFlags.NONE, None
+                            )
+                        )
+                except Exception as e:
+                    _debug(f"git monitor failed for {git_path}: {e!r}")
+                for monitor in watched:
+                    try:
+                        monitor.connect("changed", self._on_git_changed)
+                    except Exception:
+                        continue
+                self._monitors = watched
+            except Exception as e:
+                _debug(f"git monitors setup failed: {e!r}")
+                self._monitors = []
+
+        def _on_git_changed(self, _monitor, _file, _other, _event) -> None:
+            if GLib is None:
+                return
+            try:
+                if self._refresh_timer is not None:
+                    try:
+                        GLib.source_remove(self._refresh_timer)
+                    except Exception:
+                        pass
+                generation = self._git_generation
+                self._refresh_timer = GLib.timeout_add(
+                    500, self._on_git_changed_fire, generation
+                )
+            except Exception as e:
+                _debug(f"git change debounce failed: {e!r}")
+
+        def _on_git_changed_fire(self, generation: int) -> bool:
+            self._refresh_timer = None
+            if generation != self._git_generation:
+                return False
+            try:
+                self.refresh_git_statuses()
+            except Exception as e:
+                _debug(f"git auto-refresh failed: {e!r}")
+            return False
+
+        def _cancel_monitors(self) -> None:
+            if GLib is not None and self._refresh_timer is not None:
+                try:
+                    GLib.source_remove(self._refresh_timer)
+                except Exception:
+                    pass
+            self._refresh_timer = None
+            for monitor in self._monitors:
+                try:
+                    monitor.cancel()
+                except Exception:
+                    continue
+            self._monitors = []
+
+        def cleanup(self) -> None:
+            try:
+                self._git_generation += 1
+            except Exception:
+                pass
+            self._cancel_monitors()
 
         def _on_row_activated(self, _tree, path, _col) -> None:
             tree_iter = self.store.get_iter(path)
@@ -472,6 +694,12 @@ class ProjectModePlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
         self._window_key_id = None
 
         if self.browser is not None:
+            try:
+                cleanup = getattr(self.browser, "cleanup", None)
+                if callable(cleanup):
+                    cleanup()
+            except Exception:
+                pass
             side = self._safe(lambda: self.window.get_side_panel())
             if side is not None:
                 for attempt in (lambda: side.remove_item(self.browser), lambda: side.remove(self.browser)):
