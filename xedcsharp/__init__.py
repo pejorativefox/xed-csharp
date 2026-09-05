@@ -1698,6 +1698,13 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
     def _pane_visible(self, which: str) -> bool:
         widget = self._panel_widget(which)
         if widget is not None:
+            # is_visible() accounts for hidden ancestors (e.g. xed hides
+            # the pane container at startup while the panel's own flag
+            # stays True); get_visible() alone lies in that case.
+            try:
+                return bool(widget.is_visible())
+            except Exception:
+                pass
             try:
                 return bool(widget.get_visible())
             except Exception:
@@ -1732,19 +1739,142 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         except Exception as e:
             debug(f"panes set failed: {e!r}")
 
+    def _set_pane_action(self, name: str, visible: bool) -> bool:
+        """Drive xed's own View-menu toggle action. False if unreachable."""
+        try:
+            manager = self.window.get_ui_manager()
+            if manager is None:
+                return False
+            groups = manager.get_action_groups() or []
+        except Exception as e:
+            debug(f"pane action lookup failed: {e!r}")
+            return False
+        for group in groups:
+            try:
+                action = group.get_action(name)
+            except Exception:
+                continue
+            if action is None:
+                continue
+            try:
+                action.set_active(bool(visible))
+                return True
+            except Exception:
+                try:
+                    action.activate()
+                    return True
+                except Exception as e:
+                    debug(f"pane action activate failed: {e!r}")
+                    return False
+        return False
+
     def _hide_all_panels(self) -> None:
         debug("panels: hiding side + bottom")
-        self._set_panes(side=False, bottom=False)
+        ok_side = self._set_pane_action("ViewSidePane", False)
+        ok_bottom = self._set_pane_action("ViewBottomPane", False)
+        if not ok_side or not ok_bottom:
+            self._set_panes(
+                side=None if ok_side else False,
+                bottom=None if ok_bottom else False,
+            )
+
+    def _pane_geometry(self, which: str):
+        """Return (paned, pane_number, pos, max_pos, saved) or None."""
+        try:
+            widget = self._panel_widget(which)
+            if widget is None or Gio is None:
+                return None
+            paned = widget.get_parent()
+            pos = int(paned.get_position())
+            try:
+                max_pos = int(paned.get_property("max-position"))
+            except Exception:
+                max_pos = -1
+            try:
+                if paned.get_child1() is widget:
+                    pane_number = 1
+                elif paned.get_child2() is widget:
+                    pane_number = 2
+                else:
+                    pane_number = 0
+            except Exception:
+                pane_number = 0
+            try:
+                state = Gio.Settings.new("org.x.editor.state.window")
+                key = "bottom-panel-size" if which == "bottom" else "side-panel-size"
+                saved = int(state.get_int(key))
+            except Exception:
+                saved = 0
+            if saved <= 0:
+                saved = 300 if which == "bottom" else 250
+            return paned, pane_number, pos, max_pos, saved
+        except Exception as e:
+            debug(f"panels: {which} geometry probe failed: {e!r}")
+            return None
+
+    def _fix_pane_size(self, which: str) -> bool:
+        """Restore splitter position when a pane shows up collapsed.
+
+        Child 1 (side) collapses toward 0, child 2 (bottom) toward
+        max-position; xed leaves either behind when a pane starts hidden
+        (even via its own View menu). Only touches collapsed panes.
+        Returns True when a fix was applied.
+        """
+        info = self._pane_geometry(which)
+        if info is None:
+            return False
+        paned, pane_number, pos, max_pos, saved = info
+        debug(f"panels: {which} child={pane_number} pos={pos} max={max_pos} saved={saved}")
+        target = None
+        if pane_number == 2 and max_pos > 0:
+            if pos >= max_pos - 1 or pos <= 0:
+                target = max(0, max_pos - saved)
+        elif pane_number == 1:
+            if pos <= 1:
+                target = saved
+        elif pos <= 0:
+            target = saved
+        if target is None:
+            return False
+        try:
+            paned.set_position(target)
+            debug(f"panels: {which} size restored to {target}")
+            return True
+        except Exception as e:
+            debug(f"panes size restore failed: {e!r}")
+            return False
+
+    def _ensure_pane_size(self, which: str) -> None:
+        self._fix_pane_size(which)
+        # Re-assert after xed's 125ms open/close animation, which can
+        # overwrite an immediately-set position with a stale target.
+        try:
+            GLib.timeout_add(250, lambda: self._delayed_pane_size(which))
+        except Exception:
+            pass
+
+    def _delayed_pane_size(self, which: str) -> bool:
+        try:
+            self._fix_pane_size(which)
+        except Exception as e:
+            debug(f"panes delayed size failed: {e!r}")
+        return False
+
+    def _toggle_pane(self, action_name: str, which: str) -> None:
+        target = not self._pane_visible(which)
+        if self._set_pane_action(action_name, target):
+            debug(f"panels: {which} toggled via menu action")
+        else:
+            debug(f"panels: {which} -> {target} (fallback)")
+            self._set_panes(**{which: target})
+        if target:
+            self._ensure_pane_size(which)
 
     def _toggle_bottom_panel(self) -> None:
-        visible = self._pane_visible("bottom")
-        debug(f"panels: bottom -> {not visible}")
-        self._set_panes(bottom=not visible)
+        self._toggle_pane("ViewBottomPane", "bottom")
 
     def _toggle_side_panel(self) -> None:
-        visible = self._pane_visible("side")
-        debug(f"panels: side -> {not visible}")
-        self._set_panes(side=not visible)
+        self._toggle_pane("ViewSidePane", "side")
 
     def _show_fuzzy_finder(self) -> None:
         files = list(getattr(self, "_solution_files", None) or [])
