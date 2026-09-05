@@ -250,7 +250,7 @@ def _gio_file_path(location) -> str | None:
 
 
 PANEL_ICONS = {
-    "solution": ("folder", "package-x-generic", "text-x-generic"),
+    "solution": ("application-x-executable", "folder", "package-x-generic"),
     "tests": ("applications-science", "system-run", "dialog-information"),
     "output": ("utilities-terminal", "text-x-generic", "dialog-information"),
     "debug": ("media-playback-start", "system-run", "dialog-information"),
@@ -437,6 +437,9 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             self._connect(self.tracker, "launch-debug", lambda _w: self._debug_project(None))
             self._connect(self.tracker, "fuzzy-finder", lambda _w: self._show_fuzzy_finder())
             self._connect(self.tracker, "open-folder", lambda _w: self._open_solution_folder())
+            self._connect(self.tracker, "hide-panels", lambda _w: self._hide_all_panels())
+            self._connect(self.tracker, "toggle-bottom-panel", lambda _w: self._toggle_bottom_panel())
+            self._connect(self.tracker, "toggle-side-panel", lambda _w: self._toggle_side_panel())
             try:
                 self.tracker.attach(self.window)
             except Exception as e:
@@ -1634,6 +1637,78 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             elif node.path.endswith(".cs"):
                 return node.path
         return None
+
+    PANES_SCHEMA = "org.x.editor.preferences.ui"
+
+    def _panes_settings(self):
+        if Gio is None:
+            return None
+        try:
+            return Gio.Settings.new(self.PANES_SCHEMA)
+        except Exception as e:
+            debug(f"panes settings unavailable: {e!r}")
+            return None
+
+    def _panel_widget(self, which: str):
+        try:
+            if which == "side":
+                get = self.window.get_side_panel
+            else:
+                get = self.window.get_bottom_panel
+            return self._safe(get)
+        except Exception:
+            return None
+
+    def _pane_visible(self, which: str) -> bool:
+        widget = self._panel_widget(which)
+        if widget is not None:
+            try:
+                return bool(widget.get_visible())
+            except Exception:
+                pass
+        settings = self._panes_settings()
+        if settings is not None:
+            try:
+                key = "side-panel-visible" if which == "side" else "bottom-panel-visible"
+                return bool(settings.get_boolean(key))
+            except Exception:
+                pass
+        return True
+
+    def _set_panes(self, side=None, bottom=None) -> None:
+        for which, value in (("side", side), ("bottom", bottom)):
+            if value is None:
+                continue
+            widget = self._panel_widget(which)
+            if widget is not None:
+                try:
+                    widget.set_visible(bool(value))
+                except Exception as e:
+                    debug(f"panes widget failed: {e!r}")
+        settings = self._panes_settings()
+        if settings is None:
+            return
+        try:
+            if side is not None:
+                settings.set_boolean("side-panel-visible", bool(side))
+            if bottom is not None:
+                settings.set_boolean("bottom-panel-visible", bool(bottom))
+        except Exception as e:
+            debug(f"panes set failed: {e!r}")
+
+    def _hide_all_panels(self) -> None:
+        debug("panels: hiding side + bottom")
+        self._set_panes(side=False, bottom=False)
+
+    def _toggle_bottom_panel(self) -> None:
+        visible = self._pane_visible("bottom")
+        debug(f"panels: bottom -> {not visible}")
+        self._set_panes(bottom=not visible)
+
+    def _toggle_side_panel(self) -> None:
+        visible = self._pane_visible("side")
+        debug(f"panels: side -> {not visible}")
+        self._set_panes(side=not visible)
 
     def _show_fuzzy_finder(self) -> None:
         files = list(getattr(self, "_solution_files", None) or [])

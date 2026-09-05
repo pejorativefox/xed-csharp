@@ -121,6 +121,9 @@ class ViewTracker(GObject.Object):
         "launch-debug": (GObject.SignalFlags.RUN_LAST, None, ()),
         "fuzzy-finder": (GObject.SignalFlags.RUN_LAST, None, ()),
         "open-folder": (GObject.SignalFlags.RUN_LAST, None, ()),
+        "hide-panels": (GObject.SignalFlags.RUN_LAST, None, ()),
+        "toggle-bottom-panel": (GObject.SignalFlags.RUN_LAST, None, ()),
+        "toggle-side-panel": (GObject.SignalFlags.RUN_LAST, None, ()),
     }
 
     def __init__(self) -> None:
@@ -306,6 +309,18 @@ class ViewTracker(GObject.Object):
             # Open a folder containing a solution (all file types).
             debug("key: Ctrl+Shift+O open-folder (all file types)")
             self.emit("open-folder")
+            return True
+        if ctrl and not shift and not alt and keyname.lower() == "b":
+            debug("key: Ctrl+B hide-panels (all file types)")
+            self.emit("hide-panels")
+            return True
+        if ctrl and not shift and not alt and keyname.lower() == "j":
+            debug("key: Ctrl+J toggle-bottom-panel (all file types)")
+            self.emit("toggle-bottom-panel")
+            return True
+        if ctrl and not shift and not alt and keyname.lower() == "e":
+            debug("key: Ctrl+E toggle-side-panel (all file types)")
+            self.emit("toggle-side-panel")
             return True
         if not is_csharp_doc(doc):
             return False
