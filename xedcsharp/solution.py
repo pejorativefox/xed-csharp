@@ -113,6 +113,49 @@ def find_projects_fallback(root_dir: str) -> List[str]:
     return sorted(found)
 
 
+@dataclass
+class FileNode:
+    name: str
+    path: str
+    is_dir: bool
+    children: List["FileNode"] = field(default_factory=list)
+
+
+def project_tree(root_dir: str, max_depth: int = 8) -> List[FileNode]:
+    """Recursive .cs tree for the explorer (dirs first, alphabetical).
+
+    Prunes build output, hidden dirs and symlinked dirs (same crawl-safety
+    rationale as the fallback walk). Directories are only included when
+    they (transitively) contain .cs files.
+    """
+    nodes: List[FileNode] = []
+    try:
+        entries = sorted(
+            os.scandir(root_dir),
+            key=lambda e: (not e.is_dir(follow_symlinks=False), e.name.lower()),
+        )
+    except OSError:
+        return []
+    for entry in entries:
+        try:
+            if entry.is_dir(follow_symlinks=False):
+                if (
+                    entry.name in _PRUNE_DIRS
+                    or entry.name.startswith(".")
+                    or os.path.islink(entry.path)
+                    or max_depth <= 0
+                ):
+                    continue
+                children = project_tree(entry.path, max_depth - 1)
+                if children:
+                    nodes.append(FileNode(entry.name, entry.path, True, children))
+            elif entry.name.endswith(".cs"):
+                nodes.append(FileNode(entry.name, entry.path, False, []))
+        except OSError:
+            continue
+    return nodes
+
+
 def parse_sln_list_output(text: str, solution_dir: str) -> List[str]:
     """Parse `dotnet sln list` output into absolute .csproj paths."""
     projects: List[str] = []

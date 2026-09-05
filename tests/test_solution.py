@@ -127,6 +127,62 @@ def test_parse_csproj_test_detection():
         assert info.package_refs == ["xunit 2.9.0"]
 
 
+def _touch(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write("// x")
+
+
+def _flatten(nodes):
+    out = []
+    for node in nodes:
+        out.append((node.name, node.is_dir))
+        out.extend(_flatten(node.children))
+    return out
+
+
+def test_project_tree_nested_and_sorted():
+    with tempfile.TemporaryDirectory() as tmp:
+        _touch(os.path.join(tmp, "Top.cs"))
+        _touch(os.path.join(tmp, "Zeta", "Deep.cs"))
+        _touch(os.path.join(tmp, "Alpha", "Mid.cs"))
+        _touch(os.path.join(tmp, "readme.md"))
+        nodes = solution.project_tree(tmp)
+        assert [(n.name, n.is_dir) for n in nodes] == [
+            ("Alpha", True),
+            ("Zeta", True),
+            ("Top.cs", False),
+        ]
+        assert [(n.name, n.is_dir) for n in nodes[0].children] == [("Mid.cs", False)]
+
+
+def test_project_tree_prunes_junk():
+    with tempfile.TemporaryDirectory() as tmp:
+        _touch(os.path.join(tmp, "bin", "Built.cs"))
+        _touch(os.path.join(tmp, "obj", "Gen.cs"))
+        _touch(os.path.join(tmp, ".hidden", "H.cs"))
+        _touch(os.path.join(tmp, "Empty", "note.txt"))
+        with tempfile.TemporaryDirectory() as elsewhere:
+            _touch(os.path.join(elsewhere, "Linked.cs"))
+            os.symlink(elsewhere, os.path.join(tmp, "link"))
+        _touch(os.path.join(tmp, "Real.cs"))
+        nodes = solution.project_tree(tmp)
+        assert [(n.name, n.is_dir) for n in nodes] == [("Real.cs", False)]
+
+
+def test_project_tree_depth_cap():
+    with tempfile.TemporaryDirectory() as tmp:
+        deep = os.path.join(tmp, "a", "b", "c")
+        _touch(os.path.join(deep, "Deep.cs"))
+        assert solution.project_tree(tmp, max_depth=1) == []
+        assert _flatten(solution.project_tree(tmp, max_depth=3)) == [
+            ("a", True),
+            ("b", True),
+            ("c", True),
+            ("Deep.cs", False),
+        ]
+
+
 def test_load_solution_glob_fallback(tmp_path=None):
     import tempfile
 

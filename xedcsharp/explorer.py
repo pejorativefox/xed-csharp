@@ -12,7 +12,7 @@ gi.require_version("Gdk", "3.0")
 from gi.repository import GObject, Gtk, Gdk  # type: ignore
 
 from .logging_util import debug
-from .solution import ProjectInfo, SolutionModel
+from .solution import ProjectInfo, SolutionModel, project_tree
 
 (COL_LABEL, COL_PATH, COL_KIND, COL_HINT) = range(4)
 
@@ -73,16 +73,19 @@ class SolutionExplorer(Gtk.Box):
             if project.is_test_project:
                 hint = (hint + " [tests]").strip()
             proj_iter = self.store.append(sln_iter, [project.name, project.path, "project", hint])
-            # List top-level .cs files as children (cheap navigation aid).
             try:
-                project_dir = os.path.dirname(project.path)
-                for entry in sorted(os.listdir(project_dir)):
-                    if entry.endswith(".cs"):
-                        full = os.path.join(project_dir, entry)
-                        self.store.append(proj_iter, [entry, full, "file", ""])
-            except OSError as e:
-                debug(f"explorer listdir failed: {e!r}")
-        self.tree.expand_all()
+                self._append_tree(proj_iter, project_tree(os.path.dirname(project.path)))
+            except Exception as e:
+                debug(f"explorer tree failed: {e!r}")
+        self.tree.collapse_all()
+
+    def _append_tree(self, parent, nodes) -> None:
+        for node in nodes:
+            if node.is_dir:
+                folder_iter = self.store.append(parent, [node.name + "/", node.path, "folder", ""])
+                self._append_tree(folder_iter, node.children)
+            else:
+                self.store.append(parent, [node.name, node.path, "file", ""])
 
     # -- interaction -------------------------------------------------
     def _selected(self):
@@ -102,6 +105,11 @@ class SolutionExplorer(Gtk.Box):
         fpath = self.store.get_value(tree_iter, COL_PATH)
         if kind == "file" and os.path.isfile(fpath):
             self.emit("open-file", fpath)
+        elif kind == "folder":
+            if self.tree.row_expanded(path):
+                self.tree.collapse_row(path)
+            else:
+                self.tree.expand_row(path, False)
 
     def _on_button_press(self, _tree, event) -> bool:
         if event.button != 3:
@@ -115,6 +123,12 @@ class SolutionExplorer(Gtk.Box):
         if not selected:
             return False
         _label, fpath, kind = selected
+        if kind == "folder":
+            if self.tree.row_expanded(path):
+                self.tree.collapse_row(path)
+            else:
+                self.tree.expand_row(path, False)
+            return True
         menu = Gtk.Menu()
         if kind == "file":
             item = Gtk.MenuItem.new_with_label("Open")
