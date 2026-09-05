@@ -1,0 +1,520 @@
+# -*- coding: utf-8 -*-
+"""git-inline-diff: VS Code-style git gutter marks (added/modified/deleted).
+
+Display-only v1: diffs the saved file vs HEAD, refreshed on save and tab
+switch. Untracked files show every line as added.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import threading
+
+try:
+    from . import diffparse as _diffparse
+except Exception:
+    try:
+        import diffparse as _diffparse  # type: ignore[no-redef]
+    except Exception:
+        _diffparse = None  # type: ignore[assignment]
+
+_XED_LIBDIRS = (
+    "/usr/lib64/xed",
+    "/usr/lib/xed",
+    "/usr/lib/x86_64-linux-gnu/xed",
+    "/usr/local/lib/xed",
+    "/app/lib/xed",
+)
+
+_REFRESH_DEBOUNCE_MS = 300
+
+
+def _ensure_xed_gi_paths() -> None:
+    try:
+        typelib_dirs = [
+            os.path.join(d, "girepository-1.0")
+            for d in _XED_LIBDIRS
+            if os.path.isfile(os.path.join(d, "girepository-1.0", "Xed-1.0.typelib"))
+        ]
+        if typelib_dirs:
+            old = os.environ.get("GI_TYPELIB_PATH", "")
+            os.environ["GI_TYPELIB_PATH"] = ":".join(typelib_dirs + ([old] if old else []))
+            try:
+                import gi as _gi
+
+                try:
+                    _gi.require_version("GIRepository", "3.0")
+                except Exception:
+                    try:
+                        _gi.require_version("GIRepository", "2.0")
+                    except Exception:
+                        pass
+                from gi.repository import GIRepository  # type: ignore
+
+                repo = None
+                for method in ("dup_default", "get_default"):
+                    try:
+                        repo = getattr(GIRepository.Repository, method)()
+                        break
+                    except Exception:
+                        continue
+                if repo is not None:
+                    for path in typelib_dirs:
+                        try:
+                            repo.prepend_search_path(path)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+        for libdir in _XED_LIBDIRS:
+            candidate = os.path.join(libdir, "libxed.so")
+            if os.path.isfile(candidate):
+                try:
+                    import ctypes
+
+                    ctypes.CDLL(candidate, mode=ctypes.RTLD_GLOBAL)
+                except Exception:
+                    pass
+                break
+    except Exception as e:
+        sys.stderr.write(f"[git-inline-diff] typelib setup failed: {e!r}\n")
+
+
+def _debug(message: str) -> None:
+    if os.environ.get("XED_PLUGIN_DEBUG", "").strip().lower() in ("", "0", "false", "no", "off"):
+        return
+    try:
+        sys.stderr.write(f"[git-inline-diff] {message}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def doc_path(doc) -> str | None:
+    """Best-effort file path for a document, or None for untitled/remote."""
+    try:
+        location = doc.get_location()
+    except Exception:
+        location = None
+    if location is None:
+        try:
+            location = doc.get_file().get_location()
+        except Exception:
+            location = None
+    if location is None:
+        return None
+    try:
+        if not location.has_uri_scheme("file"):
+            return None
+        return location.get_path()
+    except Exception:
+        return None
+
+
+try:
+    import gi
+
+    _ensure_xed_gi_paths()
+
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("Gdk", "3.0")
+    gi.require_version("Xed", "1.0")
+    try:
+        gi.require_version("GdkPixbuf", "2.0")
+    except Exception:
+        pass
+    try:
+        gi.require_version("GtkSource", "4")
+    except Exception:
+        try:
+            gi.require_version("GtkSource", "3.0")
+        except Exception:
+            pass
+
+    from gi.repository import GObject, Gtk, Gdk, Gio, GLib, Xed  # type: ignore
+    try:
+        from gi.repository import GdkPixbuf  # type: ignore
+    except Exception:
+        GdkPixbuf = None  # type: ignore[assignment]
+    try:
+        from gi.repository import GtkSource  # type: ignore
+    except Exception:
+        GtkSource = None  # type: ignore[assignment]
+except Exception:
+    class _DummyObject:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        @classmethod
+        def Property(cls, *args, **kwargs):  # noqa: N802
+            return None
+
+    class _DummyGObject:
+        Object = _DummyObject
+        SignalFlags = type("SignalFlags", (), {"RUN_LAST": 0})
+        TYPE_STRING = str
+
+        @classmethod
+        def Property(cls, *args, **kwargs):  # noqa: N802
+            return None
+
+    class _DummyXed:
+        class WindowActivatable:
+            pass
+
+        Window = object
+
+    GObject = _DummyGObject  # type: ignore[no-redef]
+    Xed = _DummyXed  # type: ignore[no-redef]
+    Gtk = Gio = Gdk = GLib = None  # type: ignore[no-redef]
+    GdkPixbuf = None  # type: ignore[no-redef]
+    GtkSource = None  # type: ignore[no-redef]
+
+_GTKSOURCE_AVAILABLE = GtkSource is not None
+
+_MARK_COLORS = (
+    ("gitinline-added", "#73C991"),
+    ("gitinline-modified", "#E2C08D"),
+    ("gitinline-deleted", "#C74E39"),
+)
+
+#: Gutter icon size in px. Deliberately small: the pixbuf renders only in
+#: the marks gutter, leaving the text area untouched.
+_MARK_ICON_SIZE = 12
+
+
+def rgba_pixel(color: str) -> int | None:
+    """Pack '#RRGGBB' into a 0xRRGGBBFF pixel (headless-safe)."""
+    try:
+        text = color.strip().lstrip("#")
+        if len(text) != 6:
+            return None
+        return (int(text, 16) << 8) | 0xFF
+    except Exception:
+        return None
+
+
+def color_pixbuf(color: str, size: int = _MARK_ICON_SIZE):
+    """Solid-color square pixbuf for a gutter mark, or None (soft-only).
+
+    Rendered via MarkAttributes.set_pixbuf so only the gutter is painted —
+    never the line background.
+    """
+    if GdkPixbuf is None:
+        return None
+    pixel = rgba_pixel(color)
+    if pixel is None:
+        return None
+    try:
+        from gi.repository import GdkPixbuf as _Pb  # type: ignore
+
+        pixbuf = _Pb.Pixbuf.new(_Pb.Colorspace.RGB, True, 8, size, size)
+        pixbuf.fill(pixel)
+        return pixbuf
+    except Exception as e:
+        _debug(f"gutter pixbuf failed: {e!r}")
+        return None
+
+
+class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[misc]
+    __gtype_name__ = "XedGitInlineDiffPlugin"
+
+    window = GObject.Property(type=Xed.Window)  # type: ignore[arg-type]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._signal_ids: list = []
+        self._mark_views_configured: set = set()
+        self._generations: dict = {}
+        self._tab_states: dict = {}
+        self._debounce_timer = None
+        self._pending_paths: set = set()
+
+    # -- lifecycle ---------------------------------------------------
+    def do_activate(self) -> None:
+        if Gtk is None or _diffparse is None:
+            return
+        for signal, handler in (
+            ("tab-added", self._on_tab_added),
+            ("tab-removed", self._on_tab_removed),
+            ("active-tab-changed", self._on_active_tab_changed),
+            ("active-tab-state-changed", self._on_tab_state_changed),
+        ):
+            try:
+                self._signal_ids.append(
+                    (self.window, self.window.connect(signal, handler))
+                )
+            except Exception as e:
+                _debug(f"connect {signal} failed: {e!r}")
+        self._schedule_active()
+
+    def do_deactivate(self) -> None:
+        try:
+            self._generations.clear()
+            self._pending_paths.clear()
+        except Exception:
+            pass
+        if GLib is not None and self._debounce_timer is not None:
+            try:
+                GLib.source_remove(self._debounce_timer)
+            except Exception:
+                pass
+        self._debounce_timer = None
+        for obj, handler_id in self._signal_ids:
+            try:
+                obj.disconnect(handler_id)
+            except Exception:
+                pass
+        self._signal_ids = []
+        self._mark_views_configured = set()
+        self._tab_states = {}
+
+    def do_update_state(self) -> None:
+        return
+
+    # -- signals -----------------------------------------------------
+    def _on_tab_added(self, _window, tab) -> None:
+        try:
+            path = doc_path(tab.get_document())
+        except Exception:
+            path = None
+        if path:
+            self._schedule_paths([path])
+
+    def _on_tab_removed(self, _window, tab) -> None:
+        try:
+            path = doc_path(tab.get_document())
+        except Exception:
+            path = None
+        if path:
+            try:
+                self._generations.pop(path, None)
+            except Exception:
+                pass
+
+    def _on_active_tab_changed(self, window, *_args) -> None:
+        self._schedule_active()
+
+    def _on_tab_state_changed(self, window, *args) -> None:
+        """Detect save completion via SAVING -> NORMAL transitions."""
+        tab = None
+        for candidate in args:
+            if candidate is not None and hasattr(candidate, "get_document"):
+                tab = candidate
+                break
+        if tab is None:
+            try:
+                tab = window.get_active_tab()
+            except Exception:
+                return
+        if tab is None:
+            return
+        try:
+            state = str(tab.get_state())
+        except Exception:
+            return
+        try:
+            key = hash(tab)
+        except Exception:
+            return
+        previous = self._tab_states.get(key, "")
+        self._tab_states[key] = state
+        if "SAVING" in previous and state.endswith("NORMAL"):
+            try:
+                path = doc_path(tab.get_document())
+            except Exception:
+                path = None
+            if path:
+                self._schedule_paths([path])
+
+    # -- scheduling --------------------------------------------------
+    def _schedule_active(self) -> None:
+        try:
+            docs = list(self.window.get_documents())
+        except Exception:
+            return
+        paths = []
+        for doc in docs:
+            try:
+                path = doc_path(doc)
+            except Exception:
+                path = None
+            if path:
+                paths.append(path)
+        if paths:
+            self._schedule_paths(paths)
+
+    def _schedule_paths(self, paths: list) -> None:
+        if _diffparse is None:
+            return
+        for path in paths:
+            try:
+                self._pending_paths.add(path)
+                self._generations[path] = self._generations.get(path, 0) + 1
+            except Exception:
+                continue
+        if GLib is None:
+            pending = list(self._pending_paths)
+            self._pending_paths = set()
+            for path in pending:
+                self.refresh_path(path)
+            return
+        try:
+            if self._debounce_timer is not None:
+                try:
+                    GLib.source_remove(self._debounce_timer)
+                except Exception:
+                    pass
+            self._debounce_timer = GLib.timeout_add(
+                _REFRESH_DEBOUNCE_MS, self._on_debounce_fire
+            )
+        except Exception as e:
+            _debug(f"debounce failed: {e!r}")
+
+    def _on_debounce_fire(self) -> bool:
+        self._debounce_timer = None
+        try:
+            pending = list(self._pending_paths)
+        except Exception:
+            pending = []
+        self._pending_paths = set()
+        for path in pending:
+            self.refresh_path(path)
+        return False
+
+    def refresh_path(self, path: str) -> None:
+        """Re-query git for one file off the UI thread, then repaint."""
+        if _diffparse is None or not path:
+            return
+        generation = self._generations.get(path, 0)
+        try:
+            thread = threading.Thread(
+                target=self._query_thread, args=(path, generation), daemon=True
+            )
+            thread.start()
+        except Exception as e:
+            _debug(f"refresh spawn failed: {e!r}")
+
+    def _query_thread(self, path: str, generation: int) -> None:
+        dp = _diffparse
+        line_count = self._doc_line_count(path)
+        result: dict = {"added": [], "modified": [], "deleted": []}
+        try:
+            folder = os.path.dirname(path)
+            root = dp.find_git_root(folder)
+            if root is not None:
+                status = dp.file_status_short(root, path)
+                if status == "??":
+                    result = dp.untracked_marks(line_count)
+                elif status:
+                    text = dp.get_diff_text(root, path)
+                    hunks = dp.parse_unified_diff(text)
+                    result = {
+                        "added": dp.clamp_lines(hunks["added"], line_count),
+                        "modified": dp.clamp_lines(hunks["modified"], line_count),
+                        "deleted": dp.clamp_lines(hunks["deleted"], line_count),
+                    }
+        except Exception as e:
+            _debug(f"git diff failed for {path}: {e!r}")
+            result = {"added": [], "modified": [], "deleted": []}
+        try:
+            if GLib is not None:
+                GLib.idle_add(self._apply_result, path, result, generation)
+            else:
+                self._apply_result(path, result, generation)
+        except Exception as e:
+            _debug(f"apply schedule failed: {e!r}")
+
+    # -- rendering ---------------------------------------------------
+    def _find_doc(self, path: str):
+        try:
+            for doc in self.window.get_documents():
+                try:
+                    if doc_path(doc) == path:
+                        return doc
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return None
+
+    def _doc_line_count(self, path: str) -> int:
+        doc = self._find_doc(path)
+        if doc is None:
+            return 0
+        try:
+            return doc.get_line_count()
+        except Exception:
+            pass
+        try:
+            start, end = doc.get_bounds()
+            return end.get_line() + 1
+        except Exception:
+            return 0
+
+    def _apply_result(self, path: str, result: dict, generation: int) -> bool:
+        if generation != self._generations.get(path):
+            return False
+        doc = self._find_doc(path)
+        if doc is None:
+            return False
+        categories = (
+            (_diffparse.CATEGORY_ADDED, result.get("added", [])),
+            (_diffparse.CATEGORY_MODIFIED, result.get("modified", [])),
+            (_diffparse.CATEGORY_DELETED, result.get("deleted", [])),
+        )
+        try:
+            start, end = doc.get_bounds()
+        except Exception:
+            return False
+        for category, _lines in categories:
+            try:
+                doc.remove_source_marks(category, start, end)
+            except Exception:
+                pass
+        try:
+            line_count = doc.get_line_count()
+        except Exception:
+            line_count = 0
+        for category, lines in categories:
+            for line in lines:
+                try:
+                    if line_count and not 0 <= line < line_count:
+                        continue
+                    it = doc.get_iter_at_line(line)
+                    doc.create_source_mark(None, category, it)
+                except Exception:
+                    continue
+        self._configure_marks(doc)
+        return False
+
+    def _configure_marks(self, doc) -> None:
+        """Enable gutter marks on views showing this doc (once per view)."""
+        if not _GTKSOURCE_AVAILABLE:
+            return
+        try:
+            views = self.window.get_views()
+        except Exception:
+            return
+        for view in views:
+            try:
+                if view.get_buffer() is not doc:
+                    continue
+                if hash(view) in self._mark_views_configured:
+                    continue
+                view.set_show_line_marks(True)
+                for category, color in _MARK_COLORS:
+                    try:
+                        attrs = GtkSource.MarkAttributes()
+                        # Gutter icon only: painting the line background is
+                        # deliberately never used here (it washes out text).
+                        pixbuf = color_pixbuf(color)
+                        if pixbuf is not None:
+                            attrs.set_pixbuf(pixbuf)
+                        view.set_mark_attributes(category, attrs, 10)
+                    except Exception as e:
+                        _debug(f"mark attributes {category} failed: {e!r}")
+                self._mark_views_configured.add(hash(view))
+            except Exception:
+                continue

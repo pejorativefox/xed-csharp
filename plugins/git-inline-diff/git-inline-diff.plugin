@@ -1,0 +1,11 @@
+[Plugin]
+Loader=python3
+Module=gitinline
+IAge=3
+Name=git-inline-diff
+Description=VS Code-style git gutter marks (added/modified/deleted) in the editor.
+Icon=text-x-generic
+Authors=xed-csharp contributors
+Copyright=Copyright © 2026 xed-csharp contributors
+Website=https://github.com/linuxmint/xed
+Version=0.1.0
