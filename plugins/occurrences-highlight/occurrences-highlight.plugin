@@ -1,0 +1,11 @@
+[Plugin]
+Loader=python3
+Module=occurrenceshighlight
+IAge=3
+Name=Occurrences Highlight
+Description=Highlights all occurrences of the word under the cursor, with ruler ticks.
+Icon=text-x-generic
+Authors=xed-csharp contributors
+Copyright=Copyright © 2026 xed-csharp contributors
+Website=https://github.com/linuxmint/xed
+Version=0.1.0
