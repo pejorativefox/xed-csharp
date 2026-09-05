@@ -1,0 +1,11 @@
+[Plugin]
+Loader=python3
+Module=tabbedterminal
+IAge=3
+Name=Tabbed Terminal
+Description=VTE terminal tabs in the bottom panel (Ctrl+Shift+T/W new/close, Ctrl+` focus).
+Icon=utilities-terminal
+Authors=xed-csharp contributors
+Copyright=Copyright © 2026 xed-csharp contributors
+Website=https://github.com/linuxmint/xed
+Version=0.1.0
