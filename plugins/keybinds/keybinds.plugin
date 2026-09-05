@@ -1,0 +1,11 @@
+[Plugin]
+Loader=python3
+Module=keybinds
+IAge=3
+Name=Keybinds
+Description=Custom tab-switching shortcuts (Ctrl+PageUp/PageDown).
+Icon=view-list-tree
+Authors=xed-csharp contributors
+Copyright=Copyright © 2026 xed-csharp contributors
+Website=https://github.com/linuxmint/xed
+Version=0.1.0
