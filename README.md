@@ -29,11 +29,14 @@ Single multi-feature Python plugin (`Loader=python3`):
   Continue / Step Over / Into / Out / Stop. Missing `netcoredbg` degrades to an
   install hint instead of silent failure.
 
-Additional standalone plugin:
+Additional standalone plugins:
 
 - **project-mode** (side panel): language-agnostic folder browser opened with
   `Ctrl+Shift+O`; selecting a folder renders its file tree on the left and row
   activation opens files in xed.
+- **feature-toggle**: hides xed's built-in Documents list and closes the lone
+  untouched "Unsaved Document 1" starter tab on startup (both enabled by
+  default, configurable via INI).
 
 ## Shortcuts (in C# files)
 
@@ -68,6 +71,10 @@ plugins/
     panel-hider.plugin
     panelhider/
       __init__.py       # global pane hide/toggle shortcuts
+  feature-toggle/
+    feature-toggle.plugin
+    featuretoggle/
+      __init__.py       # hide Documents panel + close untouched starter tab
   project-mode/
     project-mode.plugin
     projectmode/
@@ -99,7 +106,7 @@ tests/                  # headless unit tests (no GTK, no pytest needed)
 
 ```bash
 ./install.sh
-# restart xed, enable Edit -> Preferences -> Plugins -> C# DevKit for xed
+# restart xed, enable the plugins you want in Preferences -> Plugins
 XED_PLUGIN_DEBUG=1 xed   # debug logs to stderr
 ```
 

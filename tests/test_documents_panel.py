@@ -4,11 +4,11 @@ import os
 import sys
 import types
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "xedcsharp"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "feature-toggle"))
 
-import xedcsharp
+import featuretoggle
 
-HAVE_PLUGIN = hasattr(xedcsharp.CSharpDevKitPlugin, "_hide_documents_panel")
+HAVE_PLUGIN = hasattr(featuretoggle.FeatureTogglePlugin, "_hide_documents_panel")
 
 DocsPanel = type("XedDocumentsPanel", (), {})
 
@@ -44,14 +44,10 @@ class _Settings:
 
 
 def _ns(**kw):
-    cls = xedcsharp.CSharpDevKitPlugin
+    cls = featuretoggle.FeatureTogglePlugin
     ns = types.SimpleNamespace(
         _safe=cls._safe,
         _hidden_docs=None,
-        explorer=None,
-        testpanel=None,
-        output=None,
-        debugpanel=None,
         settings=None,
         window=None,
     )
@@ -65,7 +61,7 @@ def test_find_locates_nested_panel():
         return
     docs = DocsPanel()
     side = _Side([_Box([docs])])
-    assert xedcsharp._find_documents_widget(side) is docs
+    assert featuretoggle._find_documents_widget(side) is docs
 
 
 def test_find_skips_owned_panels():
@@ -75,8 +71,8 @@ def test_find_skips_owned_panels():
     owned = _Box([inner])
     outer = DocsPanel()
     side = _Side([owned, outer])
-    assert xedcsharp._find_documents_widget(side, skip=(owned,)) is outer
-    assert xedcsharp._find_documents_widget(owned, skip=(owned,)) is None
+    assert featuretoggle._find_documents_widget(side, skip=(owned,)) is outer
+    assert featuretoggle._find_documents_widget(owned, skip=(owned,)) is None
 
 
 def test_hide_removes_and_records():
@@ -85,7 +81,7 @@ def test_hide_removes_and_records():
     docs = DocsPanel()
     side = _Side([docs])
     plugin = _ns(window=types.SimpleNamespace(get_side_panel=lambda: side))
-    xedcsharp.CSharpDevKitPlugin._hide_documents_panel(plugin)
+    featuretoggle.FeatureTogglePlugin._hide_documents_panel(plugin)
     assert plugin._hidden_docs is docs
     assert side.removed == [docs]
 
@@ -99,7 +95,7 @@ def test_hide_respects_setting_off():
         window=types.SimpleNamespace(get_side_panel=lambda: side),
         settings=_Settings(False),
     )
-    xedcsharp.CSharpDevKitPlugin._hide_documents_panel(plugin)
+    featuretoggle.FeatureTogglePlugin._hide_documents_panel(plugin)
     assert plugin._hidden_docs is None
     assert side.removed == []
 
@@ -113,12 +109,10 @@ def test_restore_readds_with_label():
         _hidden_docs=docs,
         window=types.SimpleNamespace(get_side_panel=lambda: side),
     )
-    xedcsharp.CSharpDevKitPlugin._restore_documents_panel(plugin)
+    featuretoggle.FeatureTogglePlugin._restore_documents_panel(plugin)
     assert plugin._hidden_docs is None
     assert side.added == [(docs, "Documents", "text-x-generic")]
 
 
 def test_hide_enabled_by_default():
-    from xedcsharp.settings import DEFAULTS
-
-    assert DEFAULTS.get("hide_documents_panel") is True
+    assert featuretoggle.DEFAULTS.get("hide_documents_panel") is True

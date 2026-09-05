@@ -4,11 +4,11 @@ import os
 import sys
 import types
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "xedcsharp"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "feature-toggle"))
 
-import xedcsharp
+import featuretoggle
 
-HAVE_PLUGIN = hasattr(xedcsharp.CSharpDevKitPlugin, "_close_untouched_starter_doc")
+HAVE_PLUGIN = hasattr(featuretoggle.FeatureTogglePlugin, "_close_untouched_starter_doc")
 
 
 class _Doc:
@@ -44,7 +44,7 @@ class _Window:
 
 
 def _ns(window, setting=True):
-    cls = xedcsharp.CSharpDevKitPlugin
+    cls = featuretoggle.FeatureTogglePlugin
     settings = types.SimpleNamespace(get=lambda _k: setting)
     return types.SimpleNamespace(window=window, settings=settings)
 
@@ -53,7 +53,7 @@ def test_closes_lone_untouched_doc():
     if not HAVE_PLUGIN:
         return
     window = _Window([_Doc(untouched=True)])
-    xedcsharp.CSharpDevKitPlugin._close_untouched_starter_doc(_ns(window))
+    featuretoggle.FeatureTogglePlugin._close_untouched_starter_doc(_ns(window))
     assert window.closed == [window._tab]
 
 
@@ -61,7 +61,7 @@ def test_keeps_touched_doc():
     if not HAVE_PLUGIN:
         return
     window = _Window([_Doc(untouched=False)])
-    xedcsharp.CSharpDevKitPlugin._close_untouched_starter_doc(_ns(window))
+    featuretoggle.FeatureTogglePlugin._close_untouched_starter_doc(_ns(window))
     assert window.closed == []
 
 
@@ -77,7 +77,7 @@ def test_keeps_doc_with_location():
             )
 
     window = _Window([_Located(untouched=True)])
-    xedcsharp.CSharpDevKitPlugin._close_untouched_starter_doc(_ns(window))
+    featuretoggle.FeatureTogglePlugin._close_untouched_starter_doc(_ns(window))
     assert window.closed == []
 
 
@@ -85,7 +85,7 @@ def test_keeps_multiple_docs():
     if not HAVE_PLUGIN:
         return
     window = _Window([_Doc(untouched=True), _Doc(untouched=True)])
-    xedcsharp.CSharpDevKitPlugin._close_untouched_starter_doc(_ns(window))
+    featuretoggle.FeatureTogglePlugin._close_untouched_starter_doc(_ns(window))
     assert window.closed == []
 
 
@@ -93,7 +93,7 @@ def test_respects_setting_off():
     if not HAVE_PLUGIN:
         return
     window = _Window([_Doc(untouched=True)])
-    xedcsharp.CSharpDevKitPlugin._close_untouched_starter_doc(_ns(window, setting=False))
+    featuretoggle.FeatureTogglePlugin._close_untouched_starter_doc(_ns(window, setting=False))
     assert window.closed == []
 
 
@@ -106,11 +106,9 @@ def test_close_failure_is_silent():
             raise RuntimeError("nope")
 
     window = _FailWindow([_Doc(untouched=True)])
-    xedcsharp.CSharpDevKitPlugin._close_untouched_starter_doc(_ns(window))
+    featuretoggle.FeatureTogglePlugin._close_untouched_starter_doc(_ns(window))
     assert window.closed == []
 
 
 def test_close_untitled_default_on():
-    from xedcsharp.settings import DEFAULTS
-
-    assert DEFAULTS.get("close_untitled_on_startup") is True
+    assert featuretoggle.DEFAULTS.get("close_untitled_on_startup") is True

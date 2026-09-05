@@ -1,0 +1,11 @@
+[Plugin]
+Loader=python3
+Module=featuretoggle
+IAge=3
+Name=feature-toggle
+Description=Optional UI behaviors: hide Documents panel and close default untitled tab.
+Icon=preferences-system
+Authors=xed-csharp contributors
+Copyright=Copyright © 2026 xed-csharp contributors
+Website=https://github.com/linuxmint/xed
+Version=0.1.0

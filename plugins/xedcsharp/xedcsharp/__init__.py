@@ -303,33 +303,6 @@ def _remove_from_panel(panel, widget) -> None:
             continue
 
 
-def _find_documents_widget(widget, skip: tuple = ()):
-    """Locate xed's built-in open-documents list (XedDocumentsPanel).
-
-    Not exposed in the GIR, so match by runtime type name. Never descends
-    into our own panels.
-    """
-    try:
-        if any(widget is owned for owned in skip):
-            return None
-    except Exception:
-        pass
-    try:
-        if type(widget).__name__ == "XedDocumentsPanel":
-            return widget
-    except Exception:
-        return None
-    try:
-        children = widget.get_children()
-    except Exception:
-        return None
-    for child in children or []:
-        found = _find_documents_widget(child, skip)
-        if found is not None:
-            return found
-    return None
-
-
 class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[misc]
     __gtype_name__ = "XedCSharpDevKitPlugin"
 
@@ -370,7 +343,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         self._discovering_tests = False
         self._completion_warned = ""
         self._solution_files: list[str] = []
-        self._hidden_docs = None
         self._workspace_override: str | None = None
 
     # -- activation --------------------------------------------------
@@ -397,11 +369,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             if self.debugpanel is not None and not _add_to_panel(bottom, self.debugpanel, "C# Debug", "debug"):
                 debug("bottom panel (debug) add failed")
         self._report_startup_deps()
-        self._hide_documents_panel()
-        try:
-            GLib.idle_add(self._close_untouched_starter_doc)
-        except Exception:
-            pass
 
         if self.explorer is not None:
             self._connect(self.explorer, "open-file", lambda _w, p: self._jump_to(p, 0, 0))
@@ -457,7 +424,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
 
     def do_deactivate(self) -> None:
         debug("deactivate")
-        self._restore_documents_panel()
         if self._refresh_source is not None:
             try:
                 GLib.source_remove(self._refresh_source)
@@ -517,103 +483,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
 
     def do_update_state(self) -> None:
         return
-
-    def _hide_documents_panel(self) -> None:
-        """Remove xed's built-in open-documents list from the side panel.
-
-        Soft-only: anything unexpected aborts silently and the list stays.
-        Restored by _restore_documents_panel on deactivate.
-        """
-        try:
-            if getattr(self, "_hidden_docs", None) is not None:
-                return
-            settings = getattr(self, "settings", None)
-            try:
-                enabled = bool(settings.get("hide_documents_panel")) if settings else True
-            except Exception:
-                enabled = True
-            if not enabled:
-                return
-            side = self._safe(lambda: self.window.get_side_panel())
-            if side is None:
-                return
-            owned = tuple(
-                w for w in (
-                    getattr(self, "explorer", None),
-                    getattr(self, "testpanel", None),
-                    getattr(self, "output", None),
-                    getattr(self, "debugpanel", None),
-                )
-                if w is not None
-            )
-            found = _find_documents_widget(side, skip=owned)
-            if found is None:
-                return
-            try:
-                removed = bool(side.remove_item(found))
-            except Exception:
-                removed = False
-            if not removed:
-                try:
-                    side.remove(found)
-                    removed = True
-                except Exception as e:
-                    debug(f"documents panel remove failed: {e!r}")
-                    return
-            self._hidden_docs = found
-            debug("documents panel hidden")
-        except Exception as e:
-            debug(f"documents panel hide failed: {e!r}")
-
-    def _close_untouched_starter_doc(self) -> None:
-        """Close xed's blank starter doc (single untouched, location-less tab)."""
-        try:
-            settings = getattr(self, "settings", None)
-            if settings is not None and not bool(settings.get("close_untitled_on_startup")):
-                return
-        except Exception:
-            pass
-        try:
-            docs = list(self.window.get_documents())
-        except Exception:
-            return
-        if len(docs) != 1:
-            return
-        doc = docs[0]
-        try:
-            if not doc.is_untouched() or doc_path(doc) is not None:
-                return
-        except Exception:
-            return
-        try:
-            tab = self.window.get_active_tab()
-        except Exception:
-            tab = None
-        if tab is None:
-            return
-        try:
-            self.window.close_tab(tab)
-            debug("closed untouched starter doc")
-        except Exception as e:
-            debug(f"starter doc close failed: {e!r}")
-
-    def _restore_documents_panel(self) -> None:
-        widget, self._hidden_docs = getattr(self, "_hidden_docs", None), None
-        if widget is None:
-            return
-        try:
-            side = self._safe(lambda: self.window.get_side_panel())
-            if side is None:
-                return
-            try:
-                side.add_item(widget, "Documents", "text-x-generic")
-            except Exception:
-                try:
-                    side.add(widget)
-                except Exception as e:
-                    debug(f"documents panel restore failed: {e!r}")
-        except Exception as e:
-            debug(f"documents panel restore failed: {e!r}")
 
     def _report_startup_deps(self) -> None:
         try:
@@ -750,8 +619,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             self._refresh_solution()
         except Exception as e:
             debug(f"refresh failed: {e!r}")
-        # Safety net: xed may (re)add its documents list after activation.
-        self._hide_documents_panel()
         return False
 
     # -- solution ----------------------------------------------------
