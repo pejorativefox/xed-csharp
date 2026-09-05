@@ -120,7 +120,6 @@ class ViewTracker(GObject.Object):
         ),
         "launch-debug": (GObject.SignalFlags.RUN_LAST, None, ()),
         "fuzzy-finder": (GObject.SignalFlags.RUN_LAST, None, ()),
-        "open-folder": (GObject.SignalFlags.RUN_LAST, None, ()),
     }
 
     def __init__(self) -> None:
@@ -280,10 +279,6 @@ class ViewTracker(GObject.Object):
             # Quick-open fuzzy finder (clobbers Print).
             debug("key: Ctrl+P fuzzy-finder")
             self.emit("fuzzy-finder")
-            return True
-        if ctrl and shift and not alt and keyname.lower() == "o":
-            debug("key: Ctrl+Shift+O open-folder")
-            self.emit("open-folder")
             return True
         return False
 

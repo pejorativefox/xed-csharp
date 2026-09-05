@@ -23,7 +23,7 @@ def _tracker():
 
 def _collect(tracker):
     fired: list = []
-    for signal in ("fuzzy-finder", "open-folder"):
+    for signal in ("fuzzy-finder",):
         tracker.connect(signal, lambda _w, s=signal: fired.append(s))
     return fired
 
@@ -34,8 +34,8 @@ def test_global_keys_emit():
         return
     fired = _collect(tracker)
     assert tracker._handle_global_key("p", True, False, False) is True
-    assert tracker._handle_global_key("o", True, True, False) is True
-    assert fired == ["fuzzy-finder", "open-folder"]
+    assert tracker._handle_global_key("o", True, True, False) is False
+    assert fired == ["fuzzy-finder"]
 
 
 def test_global_keys_reject_modifiers_and_plain():

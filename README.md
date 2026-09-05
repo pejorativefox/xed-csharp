@@ -29,6 +29,12 @@ Single multi-feature Python plugin (`Loader=python3`):
   Continue / Step Over / Into / Out / Stop. Missing `netcoredbg` degrades to an
   install hint instead of silent failure.
 
+Additional standalone plugin:
+
+- **project-mode** (side panel): language-agnostic folder browser opened with
+  `Ctrl+Shift+O`; selecting a folder renders its file tree on the left and row
+  activation opens files in xed.
+
 ## Shortcuts (in C# files)
 
 | Keys | Action |
@@ -48,6 +54,12 @@ Single multi-feature Python plugin (`Loader=python3`):
 | `Ctrl+J` | Toggle bottom pane |
 | `Ctrl+E` | Toggle side pane |
 
+## Global shortcuts (project-mode plugin)
+
+| Keys | Action |
+| ---- | ------ |
+| `Ctrl+Shift+O` | Choose folder root for file tree |
+
 ## Layout
 
 ```
@@ -56,6 +68,10 @@ plugins/
     panel-hider.plugin
     panelhider/
       __init__.py       # global pane hide/toggle shortcuts
+  project-mode/
+    project-mode.plugin
+    projectmode/
+      __init__.py       # folder browser side panel + Ctrl+Shift+O
   xedcsharp/
     xedcsharp.plugin    # Loader=python3, Module=xedcsharp, IAge=3
     xedcsharp/

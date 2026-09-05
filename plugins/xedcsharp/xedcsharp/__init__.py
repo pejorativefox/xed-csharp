@@ -440,7 +440,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             self._connect(self.tracker, "toggle-breakpoint", lambda _w, p, l: self._toggle_breakpoint(p, l))
             self._connect(self.tracker, "launch-debug", lambda _w: self._debug_project(None))
             self._connect(self.tracker, "fuzzy-finder", lambda _w: self._show_fuzzy_finder())
-            self._connect(self.tracker, "open-folder", lambda _w: self._open_solution_folder())
             try:
                 self.tracker.attach(self.window)
             except Exception as e:

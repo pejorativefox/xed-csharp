@@ -1,0 +1,11 @@
+[Plugin]
+Loader=python3
+Module=projectmode
+IAge=3
+Name=project-mode
+Description=Folder file browser for xed with Ctrl+Shift+O quick-open-root.
+Icon=view-list-tree
+Authors=xed-csharp contributors
+Copyright=Copyright © 2026 xed-csharp contributors
+Website=https://github.com/linuxmint/xed
+Version=0.1.0
