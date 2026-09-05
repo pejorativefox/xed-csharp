@@ -43,6 +43,20 @@ _PRUNE_DIRS = frozenset(
 
 _PANEL_ICONS = ("system-file-manager", "folder", "view-list-tree")
 _TREE_FOLDER_ICON = "folder"
+
+#: TreeView background: the theme's view base color darkened 20%.
+#: Both legacy (GtkTreeView) and modern (treeview.view) selectors so it
+#: applies across GTK 3.x versions. Resolved live by the theme engine,
+#: so light/dark theme switches update automatically.
+_TREE_BG_CSS = (
+    "GtkTreeView.view, GtkTreeView, treeview.view {"
+    " background-color: shade(@theme_base_color, 0.8); }"
+)
+
+
+def tree_bg_css() -> str:
+    """CSS for the file-tree background (pure string, headless-safe)."""
+    return _TREE_BG_CSS
 _TREE_FILE_ICON = "text-x-generic"
 
 
@@ -383,6 +397,14 @@ if Gtk is not None:
             col.add_attribute(cell, "foreground", self._col_fg)
             self.tree.append_column(col)
             self.tree.connect("row-activated", self._on_row_activated)
+            try:
+                provider = Gtk.CssProvider()
+                provider.load_from_data(tree_bg_css().encode("utf-8"))
+                self.tree.get_style_context().add_provider(
+                    provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+                )
+            except Exception as e:
+                _debug(f"tree bg css failed: {e!r}")
 
             scrolled = Gtk.ScrolledWindow()
             scrolled.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
