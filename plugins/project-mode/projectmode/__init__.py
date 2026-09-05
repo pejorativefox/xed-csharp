@@ -284,6 +284,15 @@ GIT_REFRESH_DEBOUNCE_MS = 1200
 #: `.git/` (fetch/gc/index rewrite) from keeping the editor busy.
 GIT_REFRESH_MIN_INTERVAL_S = 10.0
 
+#: Debounce for filesystem-triggered tree rebuilds (create/delete/move).
+#: Off-thread walk + idle populate, so a shorter window than git feels live
+#: without hammering the disk during bursts (e.g. `git checkout`).
+TREE_REFRESH_DEBOUNCE_MS = 800
+
+#: Cap on recursive directory watches (inotify handles). Beyond this we
+#: watch the top level only and rely on the debounced rebuild.
+MAX_WATCH_DIRS = 250
+
 #: Relative paths inside `.git/` that genuinely change status output.
 #: Everything else (objects/, logs/, index.lock, *.tmp, …) is noise —
 #: notably `git status` itself may rewrite `index`, which used to
@@ -355,6 +364,80 @@ def should_refresh_for_git_event(
         return False
     except Exception:
         return True
+
+
+def should_rebuild_tree_for_event(
+    root_dir: str,
+    file_path: str | None,
+    other_path: str | None = None,
+) -> bool:
+    """Headless-safe filter: does this event change the file tree?
+
+    True for creates/deletes/moves anywhere under the root except inside
+    `.git/` (git colors handle that side). Outside the root never counts.
+    Unknown paths count so a delete is never missed.
+    """
+    try:
+        candidates = [p for p in (file_path, other_path) if p]
+        if not candidates:
+            return True
+        for candidate in candidates:
+            rel = _rel_within(candidate, root_dir)
+            if rel is None:
+                continue
+            if rel == ".git" or rel.startswith(".git" + os.sep):
+                continue
+            return True
+        return False
+    except Exception:
+        return True
+
+
+def collect_watch_dirs(
+    root_dir: str, max_depth: int = 10, max_dirs: int = MAX_WATCH_DIRS
+) -> list[str]:
+    """Directories to monitor recursively (headless-safe, no GTK/Gio).
+
+    Mirrors build_file_tree pruning (hidden, _PRUNE_DIRS, symlinks) so we
+    never watch build output or symlink farms. Always includes root_dir.
+    """
+    out: list[str] = []
+    try:
+        if not os.path.isdir(root_dir):
+            return out
+        out.append(os.path.abspath(root_dir))
+        stack: list[tuple[str, int]] = [(os.path.abspath(root_dir), 0)]
+        while stack:
+            current, depth = stack.pop()
+            if depth >= max_depth or len(out) >= max_dirs:
+                continue
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        try:
+                            if not entry.is_dir(follow_symlinks=False):
+                                continue
+                            name = entry.name
+                            if name.startswith("."):
+                                continue
+                            if name in _PRUNE_DIRS:
+                                continue
+                            path = os.path.abspath(entry.path)
+                            if os.path.islink(path):
+                                continue
+                            if not os.path.isdir(path):
+                                continue
+                            out.append(path)
+                            if len(out) >= max_dirs:
+                                break
+                            stack.append((path, depth + 1))
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+    except Exception:
+        pass
+    return out
 
 
 def git_event_paths(file_obj, other_obj=None) -> tuple[str | None, str | None]:
@@ -475,6 +558,8 @@ if Gtk is not None:
             self._git_generation = 0
             self._monitors: list = []
             self._refresh_timer = None
+            self._tree_timer = None
+            self._watched_dirs: set = set()
             self._git_root_cached: str | None = None
             self._last_git_refresh = 0.0
             self._tree_generation = 0
@@ -576,9 +661,100 @@ if Gtk is not None:
             except Exception as e:
                 _debug(f"tree populate schedule failed: {e!r}")
 
+        def _expanded_dir_paths(self) -> set:
+            """Filesystem paths of expanded folder rows (survives rebuild)."""
+            out: set = set()
+            try:
+                store, tree = self.store, self.tree
+                def walk(tree_iter) -> None:
+                    current = tree_iter
+                    while current is not None:
+                        try:
+                            kind = store.get_value(current, self._col_kind)
+                            path = store.get_value(current, self._col_path)
+                            tpath = store.get_path(current)
+                        except Exception:
+                            kind = path = tpath = None
+                        if kind == "folder" and isinstance(path, str) and tpath is not None:
+                            try:
+                                if tree.row_expanded(tpath):
+                                    out.add(os.path.abspath(path))
+                            except Exception:
+                                pass
+                        try:
+                            child = store.iter_children(current)
+                        except Exception:
+                            child = None
+                        if child is not None:
+                            walk(child)
+                        try:
+                            current = store.iter_next(current)
+                        except Exception:
+                            break
+                first = store.get_iter_first()
+                if first is not None:
+                    walk(first)
+            except Exception:
+                pass
+            return out
+
+        def _restore_expanded(self, paths: set) -> None:
+            if not paths:
+                return
+            try:
+                store, tree = self.store, self.tree
+                def walk(tree_iter) -> None:
+                    current = tree_iter
+                    while current is not None:
+                        try:
+                            kind = store.get_value(current, self._col_kind)
+                            path = store.get_value(current, self._col_path)
+                            tpath = store.get_path(current)
+                        except Exception:
+                            kind = path = tpath = None
+                        if kind == "folder" and isinstance(path, str) and tpath is not None:
+                            try:
+                                if os.path.abspath(path) in paths:
+                                    tree.expand_row(tpath, False)
+                            except Exception:
+                                pass
+                        try:
+                            child = store.iter_children(current)
+                        except Exception:
+                            child = None
+                        if child is not None:
+                            walk(child)
+                        try:
+                            current = store.iter_next(current)
+                        except Exception:
+                            break
+                first = store.get_iter_first()
+                if first is not None:
+                    walk(first)
+            except Exception:
+                pass
+
+        def refresh_tree(self) -> None:
+            """Re-walk the root off-thread (create/delete/move updates)."""
+            root = self._root_dir
+            if not root or not os.path.isdir(root):
+                return
+            self._tree_generation += 1
+            generation = self._tree_generation
+            try:
+                thread = threading.Thread(
+                    target=self._build_tree_thread,
+                    args=(root, generation),
+                    daemon=True,
+                )
+                thread.start()
+            except Exception as e:
+                _debug(f"tree refresh spawn failed: {e!r}")
+
         def _populate_tree(self, nodes, generation: int) -> bool:
             if generation != self._tree_generation:
                 return False
+            keep_expanded = self._expanded_dir_paths()
             try:
                 self.store.clear()
             except Exception:
@@ -607,6 +783,14 @@ if Gtk is not None:
                     pass
             try:
                 self.tree.expand_row(Gtk.TreePath.new_from_indices([0]), False)
+            except Exception:
+                pass
+            try:
+                self._restore_expanded(keep_expanded)
+            except Exception:
+                pass
+            try:
+                self._refresh_dir_monitors()
             except Exception:
                 pass
             # Statuses may have arrived while the tree was building.
@@ -849,38 +1033,72 @@ if Gtk is not None:
                 return
             try:
                 watched: list = []
-                dir_file = Gio.File.new_for_path(folder)
+                watch_dirs = collect_watch_dirs(folder)
                 try:
-                    watched.append(
-                        dir_file.monitor_directory(Gio.FileMonitorFlags.NONE, None)
-                    )
-                except Exception as e:
-                    _debug(f"dir monitor failed for {folder}: {e!r}")
-                git_path = os.path.join(folder, ".git")
-                try:
-                    if os.path.isdir(git_path):
-                        watched.append(
-                            Gio.File.new_for_path(git_path).monitor_directory(
-                                Gio.FileMonitorFlags.NONE, None
-                            )
-                        )
-                    elif os.path.isfile(git_path):
-                        watched.append(
-                            Gio.File.new_for_path(git_path).monitor_file(
-                                Gio.FileMonitorFlags.NONE, None
-                            )
-                        )
-                except Exception as e:
-                    _debug(f"git monitor failed for {git_path}: {e!r}")
-                for monitor in watched:
+                    self._watched_dirs = set(watch_dirs)
+                except Exception:
+                    pass
+                for watch_dir in watch_dirs:
                     try:
-                        monitor.connect("changed", self._on_git_changed)
+                        monitor = Gio.File.new_for_path(watch_dir).monitor_directory(
+                            Gio.FileMonitorFlags.NONE, None
+                        )
+                    except Exception as e:
+                        _debug(f"dir monitor failed for {watch_dir}: {e!r}")
+                        continue
+                    try:
+                        monitor.connect("changed", self._on_dir_changed)
                     except Exception:
                         continue
+                    watched.append(monitor)
+                git_path = os.path.join(folder, ".git")
+                try:
+                    git_monitor = None
+                    if os.path.isdir(git_path):
+                        git_monitor = Gio.File.new_for_path(git_path).monitor_directory(
+                            Gio.FileMonitorFlags.NONE, None
+                        )
+                    elif os.path.isfile(git_path):
+                        git_monitor = Gio.File.new_for_path(git_path).monitor_file(
+                            Gio.FileMonitorFlags.NONE, None
+                        )
+                    if git_monitor is not None:
+                        try:
+                            git_monitor.connect("changed", self._on_git_changed)
+                        except Exception:
+                            pass
+                        watched.append(git_monitor)
+                except Exception as e:
+                    _debug(f"git monitor failed for {git_path}: {e!r}")
                 self._monitors = watched
             except Exception as e:
                 _debug(f"git monitors setup failed: {e!r}")
                 self._monitors = []
+
+        def _refresh_dir_monitors(self) -> None:
+            """Re-watch subdirs after a rebuild (new folders appear)."""
+            if Gio is None or not self._root_dir:
+                return
+            try:
+                wanted = set(collect_watch_dirs(self._root_dir))
+            except Exception:
+                return
+            try:
+                current = set(getattr(self, "_watched_dirs", set()) or set())
+            except Exception:
+                current = set()
+            if wanted == current:
+                return
+            try:
+                for monitor in list(self._monitors):
+                    try:
+                        monitor.cancel()
+                    except Exception:
+                        continue
+                self._monitors = []
+                self._setup_git_monitors(self._root_dir)
+            except Exception as e:
+                _debug(f"dir monitors refresh failed: {e!r}")
 
         def _arm_git_timer(self, delay_ms: int, generation: int) -> None:
             if GLib is None:
@@ -925,19 +1143,93 @@ if Gtk is not None:
                 _debug(f"git auto-refresh failed: {e!r}")
             return False
 
-        def _cancel_monitors(self) -> None:
-            if GLib is not None and self._refresh_timer is not None:
+        def _arm_tree_timer(self, delay_ms: int, generation: int) -> None:
+            if GLib is None:
                 try:
-                    GLib.source_remove(self._refresh_timer)
+                    self.refresh_tree()
                 except Exception:
                     pass
-            self._refresh_timer = None
+                return
+            try:
+                if self._tree_timer is not None:
+                    try:
+                        GLib.source_remove(self._tree_timer)
+                    except Exception:
+                        pass
+                    self._tree_timer = None
+                self._tree_timer = GLib.timeout_add(
+                    max(50, int(delay_ms)), self._on_tree_changed_fire, generation
+                )
+            except Exception as e:
+                _debug(f"tree change debounce failed: {e!r}")
+
+        def _on_dir_changed(self, _monitor, _file, _other=None, _event=None) -> None:
+            try:
+                file_path, other_path = git_event_paths(_file, _other)
+                if not should_rebuild_tree_for_event(
+                    self._root_dir, file_path, other_path
+                ):
+                    return
+                if GLib is None:
+                    return
+                self._arm_tree_timer(TREE_REFRESH_DEBOUNCE_MS, self._tree_generation)
+                try:
+                    if should_refresh_for_git_event(
+                        self._root_dir, file_path, other_path
+                    ):
+                        self._arm_git_timer(
+                            GIT_REFRESH_DEBOUNCE_MS, self._git_generation
+                        )
+                except Exception:
+                    pass
+            except Exception as e:
+                _debug(f"tree change debounce failed: {e!r}")
+
+        def _on_tree_changed_fire(self, generation: int) -> bool:
+            self._tree_timer = None
+            if generation != self._tree_generation:
+                return False
+            try:
+                self.refresh_tree()
+            except Exception as e:
+                _debug(f"tree auto-refresh failed: {e!r}")
+            return False
+
+        def _cancel_monitors(self) -> None:
+            if GLib is not None:
+                for attr in ("_refresh_timer", "_tree_timer"):
+                    try:
+                        timer = getattr(self, attr, None)
+                    except Exception:
+                        timer = None
+                    if timer is not None:
+                        try:
+                            GLib.source_remove(timer)
+                        except Exception:
+                            pass
+                    try:
+                        setattr(self, attr, None)
+                    except Exception:
+                        pass
+            else:
+                try:
+                    self._refresh_timer = None
+                except Exception:
+                    pass
+                try:
+                    self._tree_timer = None
+                except Exception:
+                    pass
             for monitor in self._monitors:
                 try:
                     monitor.cancel()
                 except Exception:
                     continue
             self._monitors = []
+            try:
+                self._watched_dirs = set()
+            except Exception:
+                pass
 
         def cleanup(self) -> None:
             try:
@@ -954,8 +1246,14 @@ if Gtk is not None:
             tree_iter = self.store.get_iter(path)
             kind = self.store.get_value(tree_iter, self._col_kind)
             fpath = self.store.get_value(tree_iter, self._col_path)
-            if kind == "file" and os.path.isfile(fpath):
-                self.emit("open-file", fpath)
+            if kind == "file":
+                if os.path.isfile(fpath):
+                    self.emit("open-file", fpath)
+                    return
+                try:
+                    self.refresh_tree()
+                except Exception:
+                    pass
                 return
             if self.tree.row_expanded(path):
                 self.tree.collapse_row(path)

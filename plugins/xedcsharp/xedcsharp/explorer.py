@@ -164,8 +164,15 @@ class SolutionExplorer(Gtk.Box):
         tree_iter = self.store.get_iter(path)
         kind = self.store.get_value(tree_iter, COL_KIND)
         fpath = self.store.get_value(tree_iter, COL_PATH)
-        if kind == "file" and os.path.isfile(fpath):
-            self.emit("open-file", fpath)
+        if kind == "file":
+            if os.path.isfile(fpath):
+                self.emit("open-file", fpath)
+                return
+            try:
+                self.emit("refresh")
+            except Exception:
+                pass
+            return
         elif kind == "folder":
             if self.tree.row_expanded(path):
                 self.tree.collapse_row(path)

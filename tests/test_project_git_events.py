@@ -31,6 +31,28 @@ def test_git_outside_root_ignored():
     assert projectmode.should_refresh_for_git_event("/repo", "/other/f") is False
 
 
+def test_tree_rebuild_on_delete():
+    assert projectmode.should_rebuild_tree_for_event("/repo", "/repo/src/a.cs") is True
+    assert projectmode.should_rebuild_tree_for_event("/repo", None, None) is True
+    assert projectmode.should_rebuild_tree_for_event("/repo", "/other/f") is False
+    assert projectmode.should_rebuild_tree_for_event("/repo", "/repo/.git/HEAD") is False
+    assert projectmode.should_rebuild_tree_for_event("/repo", "/repo/.git/objects/x") is False
+
+
+def test_collect_watch_dirs_prunes():
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, "src", "sub"))
+        os.makedirs(os.path.join(tmp, ".git"))
+        os.makedirs(os.path.join(tmp, "bin"))
+        with open(os.path.join(tmp, "src", "a.txt"), "w") as f:
+            f.write("x")
+        watched = projectmode.collect_watch_dirs(tmp)
+        assert os.path.abspath(tmp) in watched
+        assert os.path.abspath(os.path.join(tmp, "src")) in watched
+        assert os.path.abspath(os.path.join(tmp, "src", "sub")) in watched
+        assert all("/.git" not in w and "/bin" not in w for w in watched)
+
+
 def test_git_event_paths_headless():
     class Fake:
         def __init__(self, p):
