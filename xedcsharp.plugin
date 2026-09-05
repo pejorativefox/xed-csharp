@@ -1,0 +1,11 @@
+[Plugin]
+Loader=python3
+Module=xedcsharp
+IAge=3
+Name=C# DevKit for xed
+Description=C# solution explorer, build/run/test, Roslyn language intelligence and debugging for xed.
+Icon=applications-development
+Authors=Thomas Krennwallner and contributors
+Copyright=Copyright © 2026 xed-csharp contributors
+Website=https://github.com/linuxmint/xed
+Version=0.1.0
