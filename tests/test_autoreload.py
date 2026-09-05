@@ -27,7 +27,8 @@ class FakeIter:
 
 
 class FakeDoc:
-    def __init__(self, modified=False, location="set", line=41, text=""):
+    def __init__(self, modified=False, location="set", line=41, text="",
+                 source_file="auto", lines=100):
         self._modified = modified
         if location == "set":
             self._location = FakeLocation()
@@ -37,12 +38,17 @@ class FakeDoc:
             self._location = location
         self._line = line
         self._text = text
+        self._source_file = object() if source_file == "auto" else source_file
+        self._lines = lines
+        self.placed_cursor = []
 
     def get_location(self):
         return self._location
 
     def get_file(self):
-        raise AttributeError("no file")
+        if isinstance(self._source_file, Exception):
+            raise self._source_file
+        return self._source_file
 
     def get_modified(self):
         return self._modified
@@ -61,6 +67,15 @@ class FakeDoc:
 
     def get_text(self, _start, _end, _hidden):
         return self._text
+
+    def get_line_count(self):
+        return self._lines
+
+    def get_iter_at_line(self, line):
+        return FakeIter(line)
+
+    def place_cursor(self, it):
+        self.placed_cursor.append(it.get_line())
 
 
 class FakeTab:
@@ -169,11 +184,55 @@ def _fake_gio_new_for_path(path):
 FakeGio.File = types.SimpleNamespace(new_for_path=staticmethod(_fake_gio_new_for_path))
 
 
+class FakeGsFile:
+    def __init__(self):
+        self.location = None
+
+    def set_location(self, location):
+        self.location = location
+
+
+class FakeLoader:
+    created = []
+
+    def __init__(self, buffer, gfile):
+        self.buffer = buffer
+        self.gfile = gfile
+        self.async_calls = []
+        self.finish_result = True
+        self.finish_error = None
+
+    @classmethod
+    def new(cls, buffer, gfile):
+        inst = cls(buffer, gfile)
+        cls.created.append(inst)
+        return inst
+
+    @classmethod
+    def reset(cls):
+        cls.created = []
+
+    def load_async(self, _prio, _canc, _prog, _prog_data, callback, user_data):
+        self.async_calls.append((callback, user_data))
+
+    def load_finish(self, _result):
+        if self.finish_error is not None:
+            raise self.finish_error
+        return self.finish_result
+
+
+FakeGtkSource = types.SimpleNamespace(
+    File=types.SimpleNamespace(new=staticmethod(FakeGsFile)),
+    FileLoader=FakeLoader,
+)
+
+
 def _plugin():
     plugin = ar.AutoReloadPlugin.__new__(ar.AutoReloadPlugin)
     plugin._signal_ids = []
     plugin._monitors = {}
     plugin._pending = {}
+    plugin._loading = set()
     return plugin
 
 
@@ -203,28 +262,83 @@ def test_should_reload_skips_untitled_doc():
 
 
 def test_maybe_reload_clean_externally_modified_tab():
-    calls = []
-    saved = getattr(ar.Xed, "commands_load_location", None)
-    ar.Xed.commands_load_location = (  # type: ignore[attr-defined]
-        lambda window, location, encoding, line: calls.append((window, location, encoding, line))
-    )
+    saved = _patched_module(GtkSource=FakeGtkSource)
+    FakeLoader.reset()
     try:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "F.cs")
             _write(path, "on disk")
-            window = FakeWindow()
+            doc = FakeDoc(modified=False, location=path, line=41, text="buffer")
+            window = FakeWindow(docs=[doc])
             plugin = _plugin()
-            tab = FakeTab(FakeDoc(modified=False, location=path, line=41, text="buffer"), state=13)
+            tab = FakeTab(doc, state=13)
             assert plugin._maybe_reload(tab, window) is True
-            assert len(calls) == 1
-            assert calls[0][0] is window
-            assert calls[0][2] is None
-            assert calls[0][3] == 41
+            assert len(FakeLoader.created) == 1
+            loader = FakeLoader.created[0]
+            assert loader.buffer is doc
+            assert loader.gfile is doc.get_file()
+            assert len(loader.async_calls) == 1
+            callback, _ud = loader.async_calls[0]
+            callback(loader, object(), None)
+            assert doc.placed_cursor == [41]
     finally:
-        if saved is None:
-            delattr(ar.Xed, "commands_load_location")
-        else:
-            ar.Xed.commands_load_location = saved
+        _restore_module(saved)
+
+
+def test_reload_uses_new_source_file_when_doc_has_none():
+    saved = _patched_module(GtkSource=FakeGtkSource)
+    FakeLoader.reset()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "F2.cs")
+            _write(path, "on disk")
+            doc = FakeDoc(modified=False, location=path, text="buffer",
+                          source_file=AttributeError("no file"))
+            window = FakeWindow(docs=[doc])
+            plugin = _plugin()
+            assert plugin._check_and_reload(window, doc, "test") is True
+            assert len(FakeLoader.created) == 1
+            assert FakeLoader.created[0].gfile.location.get_path() == path
+    finally:
+        _restore_module(saved)
+
+
+def test_reload_skips_second_load_while_in_flight():
+    saved = _patched_module(GtkSource=FakeGtkSource)
+    FakeLoader.reset()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "F3.cs")
+            _write(path, "on disk")
+            doc = FakeDoc(modified=False, location=path, text="buffer")
+            window = FakeWindow(docs=[doc])
+            plugin = _plugin()
+            assert plugin._check_and_reload(window, doc, "test") is True
+            assert plugin._check_and_reload(window, doc, "test") is False
+            assert len(FakeLoader.created) == 1
+    finally:
+        _restore_module(saved)
+
+
+def test_reload_failure_restores_cursor_and_clears_loading():
+    saved = _patched_module(GtkSource=FakeGtkSource)
+    FakeLoader.reset()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "F4.cs")
+            _write(path, "on disk")
+            doc = FakeDoc(modified=False, location=path, text="buffer")
+            window = FakeWindow(docs=[doc])
+            plugin = _plugin()
+            assert plugin._check_and_reload(window, doc, "test") is True
+            loader = FakeLoader.created[0]
+            loader.finish_result = False
+            callback, _ud = loader.async_calls[0]
+            callback(loader, object(), None)
+            assert doc.placed_cursor == []
+            assert plugin._loading == set()
+    finally:
+        _restore_module(saved)
 
 
 def test_maybe_reload_skips_modified_doc():
@@ -285,12 +399,8 @@ def test_file_differs_detects_changes():
 
 
 def test_check_and_reload_only_when_content_differs():
-    calls = []
-    saved = _patched_module(
-        Xed=types.SimpleNamespace(
-            commands_load_location=lambda w, loc, enc, line: calls.append((w, loc, line))
-        )
-    )
+    saved = _patched_module(GtkSource=FakeGtkSource)
+    FakeLoader.reset()
     try:
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "B.cs")
@@ -299,28 +409,26 @@ def test_check_and_reload_only_when_content_differs():
             plugin = _plugin()
             changed = FakeDoc(modified=False, location=path, text="old buffer")
             assert plugin._check_and_reload(window, changed, "test") is True
-            assert len(calls) == 1 and calls[0][0] is window
+            assert len(FakeLoader.created) == 1
             same = FakeDoc(modified=False, location=path, text="on disk")
             assert plugin._check_and_reload(window, same, "test") is False
-            assert len(calls) == 1
+            assert len(FakeLoader.created) == 1
             dirty = FakeDoc(modified=True, location=path, text="old buffer")
             assert plugin._check_and_reload(window, dirty, "test") is False
-            assert len(calls) == 1
+            assert len(FakeLoader.created) == 1
     finally:
         _restore_module(saved)
 
 
 def test_check_and_reload_skips_deleted_file():
-    saved = _patched_module(
-        Xed=types.SimpleNamespace(
-            commands_load_location=lambda *a: (_ for _ in ()).throw(AssertionError("must not reload"))
-        )
-    )
+    saved = _patched_module(GtkSource=FakeGtkSource)
+    FakeLoader.reset()
     try:
         with tempfile.TemporaryDirectory() as tmp:
             plugin = _plugin()
             doc = FakeDoc(modified=False, location=os.path.join(tmp, "Gone.cs"), text="x")
             assert plugin._check_and_reload(FakeWindow(), doc, "test") is False
+            assert FakeLoader.created == []
     finally:
         _restore_module(saved)
 

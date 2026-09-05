@@ -98,8 +98,19 @@ try:
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
     gi.require_version("Xed", "1.0")
+    try:
+        gi.require_version("GtkSource", "4")
+    except Exception:
+        try:
+            gi.require_version("GtkSource", "3.0")
+        except Exception:
+            pass
 
     from gi.repository import GObject, Gtk, Gdk, Gio, GLib, Xed  # type: ignore
+    try:
+        from gi.repository import GtkSource  # type: ignore
+    except Exception:
+        GtkSource = None  # type: ignore[assignment]
 except Exception:
     class _DummyObject:
         def __init__(self, *args, **kwargs) -> None:
@@ -125,6 +136,7 @@ except Exception:
     GObject = _DummyGObject  # type: ignore[no-redef]
     Xed = _DummyXed  # type: ignore[no-redef]
     Gtk = Gio = Gdk = GLib = None  # type: ignore[no-redef]
+    GtkSource = None  # type: ignore[no-redef]
 
 
 try:
@@ -168,6 +180,19 @@ def cursor_line(doc) -> int:
         return int(doc.get_iter_at_mark(doc.get_insert()).get_line())
     except Exception:
         return 0
+
+
+def _loader_file(doc, location):
+    """xed's own GtkSource.File for a doc, so its mtime tracking updates."""
+    try:
+        gfile = doc.get_file()
+    except Exception:
+        gfile = None
+    if gfile is not None:
+        return gfile
+    gfile = GtkSource.File.new()
+    gfile.set_location(location)
+    return gfile
 
 
 def doc_file_path(doc) -> str | None:
@@ -252,6 +277,7 @@ class AutoReloadPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[m
         self._signal_ids: list = []
         self._monitors: dict = {}
         self._pending: dict = {}
+        self._loading: set = set()
 
     def do_activate(self) -> None:
         self._attach(self.window)
@@ -335,18 +361,74 @@ class AutoReloadPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[m
         return self._check_and_reload(window, doc, reason="externally modified")
 
     def _reload_doc(self, window, doc, location, reason: str) -> bool:
-        line = cursor_line(doc)
-        try:
-            Xed.commands_load_location(window, location, None, line)
-        except Exception as e:
-            _debug(f"reload failed: {e!r}")
+        # commands_load_location is a no-op for already-open files (it just
+        # re-activates the tab), so reload through GtkSource.FileLoader on
+        # xed's own GtkSource.File object instead.
+        if GtkSource is None or GLib is None:
             return False
         try:
             path = location.get_path()
         except Exception:
-            path = location
-        _debug(f"reloaded {path} (clean, {reason})")
+            path = None
+        if path is not None and path in self._loading:
+            return False
+        try:
+            gfile = _loader_file(doc, location)
+            loader = GtkSource.FileLoader.new(doc, gfile)
+        except Exception as e:
+            _debug(f"reload setup failed: {e!r}")
+            return False
+        line = cursor_line(doc)
+        if path is not None:
+            self._loading.add(path)
+        holder = {"loader": loader}
+
+        def _done(src, result, _user_data=None):
+            holder.pop("loader", None)
+            if path is not None:
+                self._loading.discard(path)
+            try:
+                ok = loader.load_finish(result)
+            except Exception as e:
+                _debug(f"reload load failed: {e!r}")
+                return
+            if not ok:
+                return
+            try:
+                last = max(0, int(doc.get_line_count()) - 1)
+                doc.place_cursor(doc.get_iter_at_line(min(max(0, line), last)))
+            except Exception:
+                pass
+            self._clear_modified_state(window, doc)
+            _debug(f"reloaded {path if path is not None else location} (clean, {reason})")
+
+        try:
+            loader.load_async(GLib.PRIORITY_DEFAULT, None, None, None, _done, None)
+        except Exception as e:
+            holder.pop("loader", None)
+            if path is not None:
+                self._loading.discard(path)
+            _debug(f"reload start failed: {e!r}")
+            return False
         return True
+
+    def _clear_modified_state(self, window, doc) -> None:
+        """Best-effort dismissal of xed's stale externally-modified flag."""
+        try:
+            normal = int(Xed.TabState.STATE_NORMAL)  # type: ignore[attr-defined]
+        except Exception:
+            return
+        try:
+            location = doc_location(doc)
+            tab = window.get_tab_from_location(location) if location is not None else None
+        except Exception:
+            tab = None
+        if tab is None:
+            return
+        try:
+            tab.set_state(normal)
+        except Exception as e:
+            _debug(f"state reset failed: {e!r}")
 
     def _find_doc(self, window, path: str):
         try:
