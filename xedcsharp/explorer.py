@@ -32,6 +32,7 @@ class SolutionExplorer(Gtk.Box):
     def __init__(self) -> None:
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self._model: SolutionModel | None = None
+        self._loaded = False
 
         toolbar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         for label, signal in (
@@ -63,8 +64,46 @@ class SolutionExplorer(Gtk.Box):
         self.show_all()
 
     # -- model -------------------------------------------------------
+    def _expanded_paths(self) -> set:
+        """Index-tuples of currently expanded rows (for rebuild restore)."""
+        out: set = set()
+
+        def walk(tree_iter, prefix: tuple) -> None:
+            index = 0
+            current = tree_iter
+            while current is not None:
+                path = prefix + (index,)
+                try:
+                    from gi.repository import Gtk as _Gtk
+
+                    if self.tree.row_expanded(_Gtk.TreePath.new_from_indices(list(path))):
+                        out.add(path)
+                except Exception:
+                    pass
+                try:
+                    child = self.store.iter_children(current)
+                except Exception:
+                    child = None
+                if child is not None:
+                    walk(child, path)
+                try:
+                    current = self.store.iter_next(current)
+                except Exception:
+                    current = None
+                index += 1
+
+        try:
+            first = self.store.get_iter_first()
+        except Exception as e:
+            debug(f"explorer expanded scan failed: {e!r}")
+            return out
+        if first is not None:
+            walk(first, ())
+        return out
+
     def set_model(self, model: SolutionModel) -> None:
         self._model = model
+        keep_expanded = self._expanded_paths() if self._loaded else set()
         self.store.clear()
         sln_label = os.path.basename(model.path) if model.path else f"{os.path.basename(model.root_dir)}/ (no .sln/.slnx)"
         sln_iter = self.store.append(None, [sln_label, model.path or model.root_dir, "solution", ""])
@@ -77,7 +116,17 @@ class SolutionExplorer(Gtk.Box):
                 self._append_tree(proj_iter, project_tree(os.path.dirname(project.path)))
             except Exception as e:
                 debug(f"explorer tree failed: {e!r}")
-        self.tree.collapse_all()
+        if not self._loaded:
+            self.tree.collapse_all()
+            self._loaded = True
+        else:
+            from gi.repository import Gtk as _Gtk
+
+            for path in sorted(keep_expanded):
+                try:
+                    self.tree.expand_row(_Gtk.TreePath.new_from_indices(list(path)), False)
+                except Exception:
+                    continue
 
     def _append_tree(self, parent, nodes) -> None:
         for node in nodes:
