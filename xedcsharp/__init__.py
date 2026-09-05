@@ -398,6 +398,10 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
                 debug("bottom panel (debug) add failed")
         self._report_startup_deps()
         self._hide_documents_panel()
+        try:
+            GLib.idle_add(self._close_untouched_starter_doc)
+        except Exception:
+            pass
 
         if self.explorer is not None:
             self._connect(self.explorer, "open-file", lambda _w, p: self._jump_to(p, 0, 0))
@@ -564,6 +568,38 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             debug("documents panel hidden")
         except Exception as e:
             debug(f"documents panel hide failed: {e!r}")
+
+    def _close_untouched_starter_doc(self) -> None:
+        """Close xed's blank starter doc (single untouched, location-less tab)."""
+        try:
+            settings = getattr(self, "settings", None)
+            if settings is not None and not bool(settings.get("close_untitled_on_startup")):
+                return
+        except Exception:
+            pass
+        try:
+            docs = list(self.window.get_documents())
+        except Exception:
+            return
+        if len(docs) != 1:
+            return
+        doc = docs[0]
+        try:
+            if not doc.is_untouched() or doc_path(doc) is not None:
+                return
+        except Exception:
+            return
+        try:
+            tab = self.window.get_active_tab()
+        except Exception:
+            tab = None
+        if tab is None:
+            return
+        try:
+            self.window.close_tab(tab)
+            debug("closed untouched starter doc")
+        except Exception as e:
+            debug(f"starter doc close failed: {e!r}")
 
     def _restore_documents_panel(self) -> None:
         widget, self._hidden_docs = getattr(self, "_hidden_docs", None), None

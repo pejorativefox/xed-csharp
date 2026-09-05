@@ -134,6 +134,7 @@ class ViewTracker(GObject.Object):
         self._change_sources: dict[int, int] = {}
         self._tab_states: dict[int, str] = {}
         self._pending_tooltip = None
+        self._window_key_id = None
 
     # -- lifecycle ---------------------------------------------------
     def attach(self, window) -> None:
@@ -153,6 +154,13 @@ class ViewTracker(GObject.Object):
                 window.connect(signal, handler)
             except Exception as e:
                 debug(f"ViewTracker connect {signal} failed: {e!r}")
+        # Global shortcuts live on the window so they fire with any focus,
+        # even with no document open (no view exists to carry them then).
+        try:
+            self._window_key_id = window.connect("key-press-event", self._on_window_key_press)
+        except Exception as e:
+            debug(f"ViewTracker window keys failed: {e!r}")
+            self._window_key_id = None
 
     def detach(self) -> None:
         for record in list(self._tracked.values()):
@@ -160,6 +168,12 @@ class ViewTracker(GObject.Object):
         self._tracked.clear()
         self._change_sources.clear()
         self._tab_states.clear()
+        if self._window is not None and self._window_key_id is not None:
+            try:
+                self._window.disconnect(self._window_key_id)
+            except Exception:
+                pass
+        self._window_key_id = None
         self._window = None
 
     # -- view tracking -----------------------------------------------
@@ -262,6 +276,43 @@ class ViewTracker(GObject.Object):
             if path:
                 self.emit("doc-saved", path)
 
+    # -- global shortcuts (window-level) -------------------------------
+    def _handle_global_key(self, keyname: str, ctrl: bool, shift: bool, alt: bool) -> bool:
+        """Window-wide shortcuts: fire with any focus, no document needed."""
+        if ctrl and not shift and not alt and keyname.lower() == "p":
+            # Quick-open fuzzy finder (clobbers Print).
+            debug("key: Ctrl+P fuzzy-finder")
+            self.emit("fuzzy-finder")
+            return True
+        if ctrl and shift and not alt and keyname.lower() == "o":
+            debug("key: Ctrl+Shift+O open-folder")
+            self.emit("open-folder")
+            return True
+        if ctrl and not shift and not alt and keyname.lower() == "b":
+            debug("key: Ctrl+B hide-panels")
+            self.emit("hide-panels")
+            return True
+        if ctrl and not shift and not alt and keyname.lower() == "j":
+            debug("key: Ctrl+J toggle-bottom-panel")
+            self.emit("toggle-bottom-panel")
+            return True
+        if ctrl and not shift and not alt and keyname.lower() == "e":
+            debug("key: Ctrl+E toggle-side-panel")
+            self.emit("toggle-side-panel")
+            return True
+        return False
+
+    def _on_window_key_press(self, _window, event) -> bool:
+        try:
+            mods = event.state & Gtk.accelerator_get_default_mod_mask()
+            keyname = Gdk.keyval_name(event.keyval) or ""
+            ctrl = bool(mods & Gdk.ModifierType.CONTROL_MASK)
+            shift = bool(mods & Gdk.ModifierType.SHIFT_MASK)
+            alt = bool(mods & Gdk.ModifierType.MOD1_MASK)
+        except Exception:
+            return False
+        return self._handle_global_key(keyname, ctrl, shift, alt)
+
     # -- buffer changes ----------------------------------------------
     def _on_buffer_changed(self, doc) -> None:
         if not is_csharp_doc(doc):
@@ -300,28 +351,6 @@ class ViewTracker(GObject.Object):
             alt = bool(mods & Gdk.ModifierType.MOD1_MASK)
         except Exception:
             return False
-        if ctrl and not shift and not alt and keyname.lower() == "p":
-            # Quick-open fuzzy finder in every file type (clobbers Print).
-            debug("key: Ctrl+P fuzzy-finder (all file types)")
-            self.emit("fuzzy-finder")
-            return True
-        if ctrl and shift and not alt and keyname.lower() == "o":
-            # Open a folder containing a solution (all file types).
-            debug("key: Ctrl+Shift+O open-folder (all file types)")
-            self.emit("open-folder")
-            return True
-        if ctrl and not shift and not alt and keyname.lower() == "b":
-            debug("key: Ctrl+B hide-panels (all file types)")
-            self.emit("hide-panels")
-            return True
-        if ctrl and not shift and not alt and keyname.lower() == "j":
-            debug("key: Ctrl+J toggle-bottom-panel (all file types)")
-            self.emit("toggle-bottom-panel")
-            return True
-        if ctrl and not shift and not alt and keyname.lower() == "e":
-            debug("key: Ctrl+E toggle-side-panel (all file types)")
-            self.emit("toggle-side-panel")
-            return True
         if not is_csharp_doc(doc):
             return False
         path = doc_path(doc)

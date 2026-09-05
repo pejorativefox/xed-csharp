@@ -24,6 +24,7 @@ DEFAULTS = {
     "debug_args": "",
     "stop_at_entry": False,
     "hide_documents_panel": True,
+    "close_untitled_on_startup": True,
 }
 
 
