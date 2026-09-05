@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 
 _XED_LIBDIRS = (
     "/usr/lib64/xed",
@@ -91,7 +92,7 @@ try:
     gi.require_version("Gdk", "3.0")
     gi.require_version("Xed", "1.0")
 
-    from gi.repository import GObject, Gtk, Gdk, Gio, Xed  # type: ignore
+    from gi.repository import GObject, Gtk, Gdk, Gio, GLib, Xed  # type: ignore
 except Exception:
     class _DummyObject:
         def __init__(self, *args, **kwargs) -> None:
@@ -121,10 +122,36 @@ except Exception:
     Gtk = Gio = Gdk = None  # type: ignore[no-redef]
 
 from .files import list_project_files
-from .matcher import FuzzyIndex, fuzzy_find
+from .matcher import FuzzyIndex, fuzzy_find, fuzzy_match, markup_highlight
 
-(COL_LABEL, COL_PATH) = range(2)
+(COL_LABEL, COL_MARKUP, COL_PATH) = range(3)
 MAX_ROWS = 60
+MAX_RECENT = 20
+
+
+def order_with_recent(
+    items: list[tuple[str, str]], recent: list[str]
+) -> list[tuple[str, str]]:
+    """Recent-first ordering for finder items.
+
+    Items whose absolute path appears in ``recent`` come first, in recency
+    order (most recent first); all others keep their input order. Recent
+    entries with no matching item are dropped.
+    """
+    if not recent:
+        return list(items)
+    by_path = {path: (display, path) for display, path in items}
+    ordered: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for path in recent:
+        item = by_path.get(path)
+        if item is not None and path not in seen:
+            ordered.append(item)
+            seen.add(path)
+    for _display, path in items:
+        if path not in seen:
+            ordered.append((_display, path))
+    return ordered
 
 
 def find_project_root(window) -> str | None:
@@ -182,6 +209,7 @@ if Gtk is not None:
             self.set_default_size(560, 380)
             self._files: list[tuple[str, str]] = []
             self._index: FuzzyIndex | None = None
+            self._labels: dict[str, str] = {}
             self._entry = Gtk.Entry()
             try:
                 self._entry.set_placeholder_text("Type to filter…")
@@ -189,12 +217,12 @@ if Gtk is not None:
                 pass
             self._entry.connect("changed", lambda _e: self._refilter())
             self._entry.connect("key-press-event", self._on_entry_key)
-            self._store = Gtk.ListStore(str, str)
+            self._store = Gtk.ListStore(str, str, str)
             self._view = Gtk.TreeView.new_with_model(self._store)
             self._view.set_headers_visible(False)
             cell = Gtk.CellRendererText()
             cell.set_property("ellipsize", 2)  # middle-ellipsis for long paths
-            col = Gtk.TreeViewColumn("File", cell, text=COL_LABEL)
+            col = Gtk.TreeViewColumn("File", cell, markup=COL_MARKUP)
             self._view.append_column(col)
             self._view.connect("row-activated", lambda _v, _p, _c: self._activate_selected())
             scrolled = Gtk.ScrolledWindow()
@@ -202,6 +230,14 @@ if Gtk is not None:
             scrolled.add(self._view)
             area = self.get_content_area()
             area.pack_start(self._entry, False, False, 0)
+            self._indexing = False
+            self._status = Gtk.Label()
+            try:
+                self._status.set_halign(Gtk.Align.START)
+                self._status.set_xalign(0)
+            except Exception:
+                pass
+            area.pack_start(self._status, False, False, 0)
             area.pack_start(scrolled, True, True, 0)
             self.show_all()
 
@@ -209,6 +245,7 @@ if Gtk is not None:
         def set_files(self, items: list[tuple[str, str]]) -> None:
             """items: (display, path) pairs."""
             self._files = list(items)
+            self._labels = {display: path for display, path in self._files}
             # Score the relative display paths, not the absolute ones: the
             # common /home/... prefix would otherwise drown out real
             # differences. The index is built once; each keystroke only
@@ -218,15 +255,43 @@ if Gtk is not None:
             except Exception as e:
                 _debug(f"fuzzy index build failed: {e!r}")
                 self._index = None
+            self.set_indexing(False)
             self._refilter()
             try:
                 self._entry.grab_focus()
             except Exception:
                 pass
 
+        def set_indexing(self, on: bool) -> None:
+            """Show or clear the background-indexing indicator."""
+            self._indexing = bool(on)
+            try:
+                query = self._entry.get_text()
+            except Exception:
+                query = ""
+            try:
+                shown = len(self._store)
+            except Exception:
+                shown = 0
+            self._update_status(shown, len(self._files), query)
+
+        def _update_status(self, shown: int, total: int, query: str) -> None:
+            if total == 0 and not self._indexing:
+                text = "No files found"
+            elif shown == 0 and query:
+                text = "No matches"
+            else:
+                text = f"{shown} of {total} files"
+            if self._indexing:
+                text = f"Indexing…  {text}" if text else "Indexing…"
+            try:
+                self._status.set_text(text)
+            except Exception:
+                pass
+
         def _refilter(self) -> None:
             query = self._entry.get_text()
-            labels = {display: path for display, path in self._files}
+            labels = self._labels
             displays = [display for display, _path in self._files]
             self._store.clear()
             try:
@@ -235,9 +300,19 @@ if Gtk is not None:
                 else:
                     ranked = fuzzy_find(query, displays, limit=MAX_ROWS)
                 for display in ranked:
-                    self._store.append([display, labels.get(display, display)])
+                    positions: list[int] = []
+                    if query.strip():
+                        try:
+                            hit = fuzzy_match(query, display)
+                            positions = list(hit[1]) if hit is not None else []
+                        except Exception:
+                            positions = []
+                    self._store.append(
+                        [display, markup_highlight(display, positions), labels.get(display, display)]
+                    )
             except Exception as e:
                 _debug(f"fuzzy refilter failed: {e!r}")
+            self._update_status(len(self._store), len(self._files), query)
             self._select_row(0)
 
         # -- selection -------------------------------------------------
@@ -266,20 +341,38 @@ if Gtk is not None:
             if path:
                 self.emit("open-file", path)
 
+        def _current_index(self) -> int:
+            _model, tree_iter = self._view.get_selection().get_selected()
+            if tree_iter is not None:
+                try:
+                    return self._store.get_path(tree_iter).get_indices()[0]
+                except Exception:
+                    pass
+            return 0
+
         def _on_entry_key(self, _entry, event) -> bool:
             try:
                 name = Gdk.keyval_name(event.keyval) or ""
             except Exception:
                 return False
+            try:
+                ctrl = bool(event.state & Gdk.ModifierType.CONTROL_MASK)
+            except Exception:
+                ctrl = False
+            if ctrl and name in ("n", "N", "p", "P"):
+                self._select_row(self._current_index() + (1 if name.lower() == "n" else -1))
+                return True
             if name in ("Up", "KP_Up", "Down", "KP_Down"):
-                model, tree_iter = self._view.get_selection().get_selected()
-                current = 0
-                if tree_iter is not None:
-                    try:
-                        current = self._store.get_path(tree_iter).get_indices()[0]
-                    except Exception:
-                        current = 0
-                self._select_row(current + (-1 if name.startswith("Up") or "Up" in name else 1))
+                self._select_row(self._current_index() + (-1 if "Up" in name else 1))
+                return True
+            if name in ("Page_Up", "KP_Page_Up", "Page_Down", "KP_Page_Down"):
+                self._select_row(self._current_index() + (-10 if "Up" in name else 10))
+                return True
+            if name in ("Home", "KP_Home"):
+                self._select_row(0)
+                return True
+            if name in ("End", "KP_End"):
+                self._select_row(len(self._store) - 1)
                 return True
             if name in ("Return", "KP_Enter"):
                 self._activate_selected()
@@ -298,6 +391,8 @@ class FuzzyFinderPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
     def __init__(self) -> None:
         super().__init__()
         self._window_key_id = None
+        self._file_cache: dict[str, list[str]] = {}
+        self._recent: list[str] = []
 
     def do_activate(self) -> None:
         if Gtk is None or Gio is None:
@@ -340,6 +435,40 @@ class FuzzyFinderPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
             return False
         return self._handle_global_key(keyname, ctrl, shift, alt)
 
+    def _cached_files(self, root: str) -> list[str] | None:
+        try:
+            key = os.path.abspath(root)
+        except Exception:
+            return None
+        return self._file_cache.get(key)
+
+    def _load_in_background(self, root: str, dialog) -> None:
+        try:
+            files = list_project_files(root)
+        except Exception as e:
+            _debug(f"file index failed: {e!r}")
+            try:
+                GLib.idle_add(dialog.set_indexing, False)  # type: ignore[name-defined]
+            except Exception:
+                pass
+            return
+        key = os.path.abspath(root)
+        if files or os.path.isdir(root):
+            self._file_cache[key] = files
+        _debug(f"fuzzy: {len(files)} file(s) indexed under {root}")
+        items: list[tuple[str, str]] = []
+        for path in files:
+            try:
+                display = os.path.relpath(path, root)
+            except Exception:
+                display = path
+            items.append((display, path))
+        ordered = order_with_recent(items, self._recent)
+        try:
+            GLib.idle_add(dialog.set_files, ordered)  # type: ignore[name-defined]
+        except Exception as e:
+            _debug(f"fuzzy background update failed: {e!r}")
+
     def _show_finder(self) -> None:
         if Gtk is None:
             return
@@ -348,28 +477,30 @@ class FuzzyFinderPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
             self._notify_no_root()
             return
         try:
-            files = list_project_files(root)
-        except Exception as e:
-            _debug(f"file index failed: {e!r}")
-            files = []
-        _debug(f"fuzzy: {len(files)} file(s) indexed under {root}")
-        if not files:
-            self._notify_empty(root)
-            return
-        items: list[tuple[str, str]] = []
-        for path in files:
-            try:
-                display = os.path.relpath(path, root)
-            except Exception:
-                display = path
-            items.append((display, path))
-        try:
             dialog = FuzzyFinderDialog(parent=self.window)
         except Exception as e:
             _debug(f"fuzzy dialog create failed: {e!r}")
             return
-        dialog.set_files(items)
+        cached = self._cached_files(root)
+        if cached:
+            items: list[tuple[str, str]] = []
+            for path in cached:
+                try:
+                    display = os.path.relpath(path, root)
+                except Exception:
+                    display = path
+                items.append((display, path))
+            dialog.set_files(order_with_recent(items, self._recent))
+        else:
+            dialog.set_indexing(True)
         dialog.connect("open-file", lambda _w, p: (self._open_file(p), dialog.destroy()))
+        try:
+            thread = threading.Thread(
+                target=self._load_in_background, args=(root, dialog), daemon=True
+            )
+            thread.start()
+        except Exception as e:
+            _debug(f"fuzzy background index failed: {e!r}")
         try:
             dialog.run()
         finally:
@@ -454,3 +585,14 @@ class FuzzyFinderPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
                 self.window.create_tab_from_location(location, None, 0, True, True)
         except Exception as e:
             _debug(f"open file failed for {path}: {e!r}")
+            return
+        self._remember_recent(path)
+
+    def _remember_recent(self, path: str) -> None:
+        """Prepend path to the in-memory MRU list (dedupe + truncate)."""
+        try:
+            self._recent.remove(path)
+        except ValueError:
+            pass
+        self._recent.insert(0, path)
+        del self._recent[MAX_RECENT:]

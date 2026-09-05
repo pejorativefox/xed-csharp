@@ -218,3 +218,139 @@ def test_show_finder_without_root_prompts():
     finally:
         fuzzyfinder.find_project_root = saved
     assert prompted == [True]
+
+
+def test_markup_highlight_bolds_runs_and_escapes():
+    from fuzzyfinder.matcher import markup_highlight
+
+    assert markup_highlight("src/Foo.cs", [4, 5, 6]) == "src/<b>Foo</b>.cs"
+    assert markup_highlight("ab", [0, 1]) == "<b>ab</b>"
+    assert markup_highlight("ab", []) == "ab"
+    assert markup_highlight("a<b>&c", [0]) == "<b>a</b>&lt;b&gt;&amp;c"
+    # Out-of-range and duplicate indices are ignored, never raw markup.
+    assert markup_highlight("ab", [-1, 0, 0, 2, 99]) == "<b>a</b>b"
+    assert "<b></b>" not in markup_highlight("ab", [5])
+
+
+def test_search_top_limit_matches_full_sort():
+    paths = [f"src/module{i:04d}/file{i % 97}.cs" for i in range(2000)]
+    paths += ["core/places.cs", "CoreForge/Scene.cs", "source/app/models/post.rb"]
+    for query in ("ab", "core cs", ""):
+        got = FuzzyIndex(paths).search(query, limit=5)
+        if not query.strip():
+            assert got == paths[:5]
+            continue
+        scored = []
+        for path in paths:
+            score = fuzzy_score(query, path)
+            if score is not None:
+                scored.append((score, len(path), path))
+        scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+        assert got == [path for _, _, path in scored[:5]]
+    assert FuzzyIndex(paths).search("ab", limit=0) == []
+
+
+def test_order_with_recent():
+    import fuzzyfinder
+
+    items = [("b.txt", "/root/b.txt"), ("a.txt", "/root/a.txt"), ("c.txt", "/root/c.txt")]
+    assert fuzzyfinder.order_with_recent(items, []) == items
+    ordered = fuzzyfinder.order_with_recent(items, ["/root/c.txt", "/root/a.txt"])
+    assert [path for _display, path in ordered] == ["/root/c.txt", "/root/a.txt", "/root/b.txt"]
+    # Missing recent entries are dropped; non-recent order stays stable.
+    assert fuzzyfinder.order_with_recent(items, ["/root/gone.txt", "/root/b.txt"]) == [
+        ("b.txt", "/root/b.txt"),
+        ("a.txt", "/root/a.txt"),
+        ("c.txt", "/root/c.txt"),
+    ]
+
+
+def test_plugin_recent_and_cache_helpers():
+    import fuzzyfinder
+
+    plugin = fuzzyfinder.FuzzyFinderPlugin()
+    assert plugin._cached_files("/no/such/dir-xyz") is None
+    with tempfile.TemporaryDirectory() as tmp:
+        key = os.path.abspath(tmp)
+        assert plugin._cached_files(tmp) is None
+        plugin._file_cache[key] = [os.path.join(tmp, "a.txt")]
+        assert plugin._cached_files(tmp) == [os.path.join(tmp, "a.txt")]
+    # Recency: prepend, dedupe, truncate to MAX_RECENT.
+    plugin._remember_recent("/root/b.txt")
+    plugin._remember_recent("/root/a.txt")
+    plugin._remember_recent("/root/b.txt")
+    assert plugin._recent == ["/root/b.txt", "/root/a.txt"]
+    for i in range(fuzzyfinder.MAX_RECENT + 5):
+        plugin._remember_recent(f"/root/f{i}.txt")
+    assert len(plugin._recent) == fuzzyfinder.MAX_RECENT
+    assert plugin._recent[0] == f"/root/f{fuzzyfinder.MAX_RECENT + 4}.txt"
+    # Background load caches existing roots (recent-first) and never bad ones.
+    with tempfile.TemporaryDirectory() as tmp:
+        _touch(os.path.join(tmp, "a.txt"))
+        _touch(os.path.join(tmp, "sub", "b.txt"))
+        received: list = []
+        dialog = types.SimpleNamespace(
+            set_files=lambda items: received.append(list(items)),
+            set_indexing=lambda on: received.append(("indexing", on)),
+        )
+        saved_glib = getattr(fuzzyfinder, "GLib", None)
+        fuzzyfinder.GLib = types.SimpleNamespace(idle_add=lambda fn, *a: fn(*a))
+        try:
+            loader = fuzzyfinder.FuzzyFinderPlugin()
+            loader._recent = [os.path.join(tmp, "sub", "b.txt")]
+            loader._load_in_background(tmp, dialog)
+        finally:
+            fuzzyfinder.GLib = saved_glib
+        assert received and received[-1][0][1].endswith(os.path.join("sub", "b.txt"))
+        assert loader._cached_files(tmp) is not None
+    nosuch = fuzzyfinder.FuzzyFinderPlugin()
+    fuzzyfinder.GLib = types.SimpleNamespace(idle_add=lambda fn, *a: fn(*a))
+    try:
+        nosuch._load_in_background("/no/such/dir-xyz", dialog)
+    finally:
+        fuzzyfinder.GLib = saved_glib
+    assert nosuch._cached_files("/no/such/dir-xyz") is None
+
+
+def test_entry_ctrl_n_p_and_paging():
+    import fuzzyfinder
+
+    if fuzzyfinder.Gtk is None or fuzzyfinder.Gdk is None:
+        return
+    try:
+        dialog = fuzzyfinder.FuzzyFinderDialog(parent=None)
+    except Exception:
+        return  # no display: cannot build widgets headless
+    try:
+        items = [(f"file{i:02d}.txt", f"/root/file{i:02d}.txt") for i in range(30)]
+        dialog.set_files(items)
+        Gdk = fuzzyfinder.Gdk
+        ctrl = int(Gdk.ModifierType.CONTROL_MASK)
+
+        def press(name, state=0):
+            return dialog._on_entry_key(
+                dialog._entry,
+                types.SimpleNamespace(keyval=Gdk.keyval_from_name(name), state=state),
+            )
+
+        assert dialog._current_index() == 0
+        assert press("n", ctrl) is True
+        assert dialog._current_index() == 1
+        assert press("p", ctrl) is True
+        assert dialog._current_index() == 0
+        assert press("Page_Down") is True
+        assert dialog._current_index() == 10
+        assert press("Page_Up") is True
+        assert dialog._current_index() == 0
+        assert press("End") is True
+        assert dialog._current_index() == 29
+        assert press("Home") is True
+        assert dialog._current_index() == 0
+        # Plain n/p without Ctrl still filters text instead of navigating.
+        assert press("n") is False
+        assert press("p") is False
+    finally:
+        try:
+            dialog.destroy()
+        except Exception:
+            pass

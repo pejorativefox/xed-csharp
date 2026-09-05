@@ -19,6 +19,8 @@ Headless-safe (stdlib only) so unit tests run without a display.
 
 from __future__ import annotations
 
+import heapq
+import html
 import os
 
 _NEG_INF = float("-inf")
@@ -188,6 +190,33 @@ def fuzzy_score(query: str, candidate: str) -> float | None:
     return None if hit is None else hit[0]
 
 
+def markup_highlight(display: str, positions: list[int]) -> str:
+    """Pango markup for a display path with matched runs bolded.
+
+    Characters are escaped with :mod:`html` so filenames containing
+    ``<``/``&`` never break markup; maximal contiguous runs of valid,
+    deduplicated match indices are wrapped in ``<b>...</b>``.
+    """
+    try:
+        valid = set(p for p in positions if 0 <= p < len(display))
+    except Exception:
+        valid = set()
+    if not valid:
+        return html.escape(display, quote=False)
+    parts: list[str] = []
+    for i, ch in enumerate(display):
+        esc = html.escape(ch, quote=False)
+        if i in valid:
+            if (i - 1) not in valid:
+                parts.append("<b>")
+            parts.append(esc)
+            if (i + 1) not in valid:
+                parts.append("</b>")
+        else:
+            parts.append(esc)
+    return "".join(parts)
+
+
 class FuzzyIndex:
     """Precomputed per-candidate state so repeated searches are cheap.
 
@@ -213,13 +242,18 @@ class FuzzyIndex:
         paths = [path for path, _, _ in self._entries]
         if not terms:
             return paths[:limit]
+        if limit <= 0:
+            return []
         scored: list[tuple[float, int, str]] = []
         for path, hay_lower, bonus in self._entries:
             hit = self._score_entry(terms, path, hay_lower, bonus, path)
             if hit is not None:
                 scored.append((hit[0], len(path), path))
-        scored.sort(key=lambda item: (-item[0], item[1], item[2]))
-        return [path for _, _, path in scored[:limit]]
+        if len(scored) <= limit:
+            scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+            return [path for _, _, path in scored]
+        top = heapq.nsmallest(limit, scored, key=lambda item: (-item[0], item[1], item[2]))
+        return [path for _, _, path in top]
 
 
 def fuzzy_find(query: str, paths: list[str], limit: int = 50) -> list[str]:
