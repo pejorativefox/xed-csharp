@@ -7,7 +7,7 @@ RangeToTextSpan) triggered by rangeless textDocument/didChange events.
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "xedcsharp"))
 
 from xedcsharp import roslyn
 

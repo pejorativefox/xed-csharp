@@ -7,7 +7,7 @@ display and follow the same Xvfb-or-skip pattern as test_completion_popup.
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "xedcsharp"))
 
 from xedcsharp import gscompletion as gs_mod
 from xedcsharp import intelligence as intel

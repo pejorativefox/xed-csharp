@@ -46,18 +46,24 @@ def main() -> int:
     print("== xed-csharp doctor ==\n-- files --")
     check(
         "descriptor installed",
-        os.path.isfile(os.path.join(USER_PLUGIN_DIR, "xedcsharp.plugin")),
-        f"run ./install.sh (looked in {USER_PLUGIN_DIR})",
+        os.path.isfile(os.path.join(USER_PLUGIN_DIR, "xedcsharp", "xedcsharp.plugin")),
+        f"run ./install.sh (looked in {USER_PLUGIN_DIR}/xedcsharp)",
     )
     check(
         "package installed",
-        os.path.isfile(os.path.join(USER_PLUGIN_DIR, "xedcsharp", "__init__.py")),
+        os.path.isfile(os.path.join(USER_PLUGIN_DIR, "xedcsharp", "xedcsharp", "__init__.py")),
         "run ./install.sh",
     )
     check(
         "no stale bytecode in install dir",
-        not glob.glob(os.path.join(USER_PLUGIN_DIR, "xedcsharp", "__pycache__")),
-        "rm -rf ~/.local/share/xed/plugins/xedcsharp/__pycache__ (or re-run ./install.sh)",
+        not glob.glob(os.path.join(USER_PLUGIN_DIR, "xedcsharp", "xedcsharp", "__pycache__")),
+        "rm -rf ~/.local/share/xed/plugins/xedcsharp/xedcsharp/__pycache__ (or re-run ./install.sh)",
+        warn_only=True,
+    )
+    check(
+        "no legacy flat install shadowing the folder install",
+        not os.path.isfile(os.path.join(USER_PLUGIN_DIR, "xedcsharp.plugin")),
+        "a pre-subfolder copy is still at the plugins root; re-run ./install.sh to remove it",
         warn_only=True,
     )
 

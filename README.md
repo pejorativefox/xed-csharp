@@ -43,9 +43,11 @@ Single multi-feature Python plugin (`Loader=python3`):
 ## Layout
 
 ```
-xedcsharp.plugin        # Loader=python3, Module=xedcsharp, IAge=3
-xedcsharp/
-  __init__.py           # Xed.WindowActivatable entry + wiring
+plugins/
+  xedcsharp/
+    xedcsharp.plugin    # Loader=python3, Module=xedcsharp, IAge=3
+    xedcsharp/
+      __init__.py       # Xed.WindowActivatable entry + wiring
   views.py              # per-view tracker (sync, keys, menu, hover)
   gscompletion.py       # Roslyn GtkSource.CompletionProvider (preferred)
   completion.py         # completion popup (pure Gtk3, fallback only)
