@@ -34,6 +34,10 @@ Additional standalone plugins:
 - **project-mode** (side panel): language-agnostic folder browser opened with
   `Ctrl+Shift+O`; selecting a folder renders its file tree on the left and row
   activation opens files in xed.
+- **fuzzy-finder**: `Ctrl+P` quick-open dialog listing every file under the
+  folder loaded in project-mode (gitignore-aware), with subsequence filtering.
+  Soft-depends on project-mode at runtime: with no folder loaded it prompts
+  to pick one first.
 - **feature-toggle**: hides xed's built-in Documents list and closes the lone
   untouched "Unsaved Document 1" starter tab on startup (both enabled by
   default, configurable via INI).
@@ -63,6 +67,12 @@ Additional standalone plugins:
 | ---- | ------ |
 | `Ctrl+Shift+O` | Choose folder root for file tree |
 
+## Global shortcuts (fuzzy-finder plugin, needs project-mode root)
+
+| Keys | Action |
+| ---- | ------ |
+| `Ctrl+P` | Fuzzy-open any file under the loaded project folder |
+
 ## Layout
 
 ```
@@ -79,6 +89,12 @@ plugins/
     project-mode.plugin
     projectmode/
       __init__.py       # folder browser side panel + Ctrl+Shift+O
+  fuzzy-finder/
+    fuzzy-finder.plugin
+    fuzzyfinder/
+      __init__.py       # Ctrl+P quick-open dialog + project-mode root lookup
+      matcher.py        # subsequence fuzzy matcher (headless-testable)
+      files.py          # gitignore-aware recursive file index (headless-testable)
   xedcsharp/
     xedcsharp.plugin    # Loader=python3, Module=xedcsharp, IAge=3
     xedcsharp/

@@ -1,8 +1,12 @@
-"""Window-level global shortcuts (headless, real ViewTracker)."""
+"""ViewTracker lifecycle (headless, real ViewTracker).
+
+Window-level global shortcuts used to live here for the Ctrl+P fuzzy
+finder; that finder now belongs to the fuzzy-finder plugin (see
+tests/test_fuzzyfinder.py).
+"""
 
 import os
 import sys
-import types
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "xedcsharp"))
 
@@ -21,67 +25,23 @@ def _tracker():
     return ViewTracker()
 
 
-def _collect(tracker):
-    fired: list = []
-    for signal in ("fuzzy-finder",):
-        tracker.connect(signal, lambda _w, s=signal: fired.append(s))
-    return fired
-
-
-def test_global_keys_emit():
-    tracker = _tracker()
-    if tracker is None:
-        return
-    fired = _collect(tracker)
-    assert tracker._handle_global_key("p", True, False, False) is True
-    assert tracker._handle_global_key("o", True, True, False) is False
-    assert fired == ["fuzzy-finder"]
-
-
-def test_global_keys_reject_modifiers_and_plain():
-    tracker = _tracker()
-    if tracker is None:
-        return
-    fired = _collect(tracker)
-    assert tracker._handle_global_key("p", False, False, False) is False
-    assert tracker._handle_global_key("p", True, True, False) is False
-    assert tracker._handle_global_key("p", True, False, True) is False
-    assert tracker._handle_global_key("x", True, False, False) is False
-    assert fired == []
-
-
-def test_window_key_press_drives_globals():
+def test_view_handler_ignores_ctrl_p_without_doc():
     tracker = _tracker()
     if tracker is None:
         return
     from gi.repository import Gdk
 
-    fired = _collect(tracker)
+    import types
+
     event = types.SimpleNamespace(
         state=int(Gdk.ModifierType.CONTROL_MASK),
         keyval=Gdk.keyval_from_name("p"),
     )
-    assert tracker._on_window_key_press(None, event) is True
-    assert fired == ["fuzzy-finder"]
-
-
-def test_view_handler_ignores_globals():
-    tracker = _tracker()
-    if tracker is None:
-        return
-    from gi.repository import Gdk
-
-    fired = _collect(tracker)
-    event = types.SimpleNamespace(
-        state=int(Gdk.ModifierType.CONTROL_MASK),
-        keyval=Gdk.keyval_from_name("p"),
-    )
-    # No C# doc here; must not emit (window level owns these now).
+    # No C# doc here; must not emit anything.
     assert tracker._on_key_press(None, event, object()) is False
-    assert fired == []
 
 
-def test_attach_detach_window_keys():
+def test_attach_detach_tab_signals():
     tracker = _tracker()
     if tracker is None:
         return
@@ -101,9 +61,7 @@ def test_attach_detach_window_keys():
 
     window = _Window()
     tracker.attach(window)
-    assert "key-press-event" in connected
-    key_id = tracker._window_key_id
-    assert key_id is not None
+    for signal in ("tab-added", "tab-removed", "active-tab-changed", "active-tab-state-changed"):
+        assert signal in connected
     tracker.detach()
-    assert key_id in disconnected
-    assert tracker._window_key_id is None
+    assert tracker._window is None

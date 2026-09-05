@@ -183,28 +183,6 @@ def test_project_tree_depth_cap():
         ]
 
 
-def test_solution_files_index():
-    with tempfile.TemporaryDirectory() as tmp:
-        sln = os.path.join(tmp, "App.sln")
-        with open(sln, "w") as f:
-            f.write("x")
-        proj_dir = os.path.join(tmp, "src", "App")
-        csproj = os.path.join(proj_dir, "App.csproj")
-        _touch(csproj)
-        _touch(os.path.join(proj_dir, "Program.cs"))
-        _touch(os.path.join(proj_dir, "Sub", "Deep.cs"))
-        _touch(os.path.join(proj_dir, "bin", "Built.cs"))
-        model = solution.SolutionModel(path=sln, root_dir=tmp)
-        model.projects.append(solution.parse_csproj(csproj))
-        files = solution.solution_files(model)
-        assert files[0] == sln
-        assert csproj in files
-        assert os.path.join(proj_dir, "Program.cs") in files
-        assert os.path.join(proj_dir, "Sub", "Deep.cs") in files
-        assert os.path.join(proj_dir, "bin", "Built.cs") not in files
-        assert len(files) == len(set(files))
-
-
 def test_load_solution_glob_fallback(tmp_path=None):
     import tempfile
 

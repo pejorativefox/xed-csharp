@@ -110,7 +110,6 @@ try:
     from .output import OutputView
     from .testpanel import TestPanel
     from .debugpanel import DebugPanel
-    from .fuzzy import FuzzyFinderDialog
     from .completion import COMMIT_CHARS, CompletionPopup, NAV_KEYS
     from . import gscompletion as gs_mod
     from .views import (
@@ -201,7 +200,6 @@ except Exception:  # headless unit tests / missing typelib outside xed
     Gtk = Gio = Gdk = Pango = None  # type: ignore[no-redef]
     GtkSource = None  # type: ignore[no-redef]
     SolutionExplorer = OutputView = TestPanel = None  # type: ignore[no-redef]
-    FuzzyFinderDialog = None  # type: ignore[no-redef]
     DebugPanel = CompletionPopup = ViewTracker = None  # type: ignore[no-redef]
     NAV_KEYS = frozenset()  # type: ignore[no-redef]
     COMMIT_CHARS = frozenset({".", "(", "["})  # type: ignore[no-redef]
@@ -342,8 +340,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         self._dap_project: str | None = None
         self._discovering_tests = False
         self._completion_warned = ""
-        self._solution_files: list[str] = []
-        self._workspace_override: str | None = None
 
     # -- activation --------------------------------------------------
     def do_activate(self) -> None:
@@ -406,7 +402,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             self._connect(self.tracker, "code-action-request", self._on_code_action_request)
             self._connect(self.tracker, "toggle-breakpoint", lambda _w, p, l: self._toggle_breakpoint(p, l))
             self._connect(self.tracker, "launch-debug", lambda _w: self._debug_project(None))
-            self._connect(self.tracker, "fuzzy-finder", lambda _w: self._show_fuzzy_finder())
             try:
                 self.tracker.attach(self.window)
             except Exception as e:
@@ -635,8 +630,7 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
                 pass
         active = self._active_path()
         start = (
-            self._workspace_override
-            or active
+            active
             or self._open_doc_dir()
             or self._startup_dir()
             or os.path.expanduser("~")
@@ -648,11 +642,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         debug(f"refresh solution from {start} (active={active} cwd={cwd})")
         dotnet = self._dotnet()
         self._model = solution_mod.load_solution(start, dotnet)
-        try:
-            self._solution_files = solution_mod.solution_files(self._model)
-        except Exception as e:
-            debug(f"solution file index failed: {e!r}")
-            self._solution_files = []
         if self.explorer is not None:
             self.explorer.set_model(self._model)
         if self.output is not None:
@@ -1471,114 +1460,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
 
     def _open_file(self, path: str) -> None:
         self._jump_to(path, 0, 0)
-
-    def _open_solution_folder(self) -> None:
-        try:
-            dialog = Gtk.FileChooserDialog(
-                title="Open Solution Folder",
-                action=Gtk.FileChooserAction.SELECT_FOLDER,
-            )
-            try:
-                dialog.set_transient_for(self.window)
-                dialog.set_modal(True)
-            except Exception as e:
-                debug(f"folder chooser transient failed: {e!r}")
-            dialog.add_buttons(
-                "_Cancel", Gtk.ResponseType.CANCEL,
-                "_Open", Gtk.ResponseType.ACCEPT,
-            )
-        except Exception as e:
-            debug(f"folder chooser create failed: {e!r}")
-            return
-        try:
-            folder = dialog.get_filename() if dialog.run() == Gtk.ResponseType.ACCEPT else None
-        except Exception as e:
-            debug(f"folder chooser failed: {e!r}")
-            folder = None
-        finally:
-            try:
-                dialog.destroy()
-            except Exception:
-                pass
-        if not folder:
-            return
-        sln = solution_mod.find_solution(folder)
-        if sln is None:
-            message = f"No .sln/.slnx found under {folder}"
-            try:
-                error(message)
-            except Exception:
-                pass
-            if self.output is not None:
-                self.output.append(message + "\n")
-                self.output.set_status(message)
-            return
-        self._workspace_override = os.path.dirname(sln)
-        debug(f"workspace override -> {self._workspace_override}")
-        self._schedule_refresh()
-        first_cs = self._first_cs_under(os.path.dirname(sln))
-        if first_cs:
-            self._jump_to(first_cs, 0, 0)
-        elif self.output is not None:
-            self.output.set_status(f"{os.path.basename(sln)} selected — no .cs files found.")
-
-    @staticmethod
-    def _first_cs_under(root: str) -> str | None:
-        try:
-            nodes = solution_mod.project_tree(root)
-        except Exception:
-            return None
-        stack = list(nodes)
-        while stack:
-            node = stack.pop(0)
-            if node.is_dir:
-                stack = list(node.children) + stack
-            elif node.path.endswith(".cs"):
-                return node.path
-        return None
-
-    def _show_fuzzy_finder(self) -> None:
-        files = list(getattr(self, "_solution_files", None) or [])
-        if not files:
-            debug("fuzzy: index empty, refreshing synchronously")
-            try:
-                self._refresh_solution()
-            except Exception as e:
-                debug(f"fuzzy refresh failed: {e!r}")
-            files = list(getattr(self, "_solution_files", None) or [])
-        debug(f"fuzzy: {len(files)} file(s) indexed")
-        if not files:
-            self._open_solution_folder()
-            return
-        if FuzzyFinderDialog is None:
-            debug("fuzzy finder unavailable (no GTK)")
-            return
-        root = ""
-        try:
-            root = (self._model.root_dir if self._model else "") or ""
-        except Exception:
-            root = ""
-        items: list[tuple[str, str]] = []
-        for path in files:
-            try:
-                display = os.path.relpath(path, root) if root else path
-            except Exception:
-                display = path
-            items.append((display, path))
-        try:
-            dialog = FuzzyFinderDialog(parent=self.window)
-        except Exception as e:
-            debug(f"fuzzy dialog create failed: {e!r}")
-            return
-        dialog.set_files(items)
-        dialog.connect("open-file", lambda _w, p: (self._jump_to(p, 0, 0), dialog.destroy()))
-        try:
-            dialog.run()
-        finally:
-            try:
-                dialog.destroy()
-            except Exception:
-                pass
 
     def _on_goto_definition(self, _tracker, path: str, line: int, char: int) -> None:
         if not self._roslyn_ready():

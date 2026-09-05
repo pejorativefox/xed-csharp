@@ -1,0 +1,11 @@
+[Plugin]
+Loader=python3
+Module=fuzzyfinder
+IAge=3
+Name=fuzzy-finder
+Description=Fuzzy file opener (Ctrl+P) for the folder loaded in project-mode.
+Icon=system-search
+Authors=xed-csharp contributors
+Copyright=Copyright © 2026 xed-csharp contributors
+Website=https://github.com/linuxmint/xed
+Version=0.1.0
