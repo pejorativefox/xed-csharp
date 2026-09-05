@@ -33,7 +33,10 @@ Additional standalone plugins:
 
 - **project-mode** (side panel): language-agnostic folder browser opened with
   `Ctrl+Shift+O`; selecting a folder renders its file tree on the left and row
-  activation opens files in xed.
+  activation opens files in xed. Also loads a folder at startup: a fresh
+  `cd proj && xed` auto-loads the cwd when it looks like a project, and
+  `xed-code [folder]` opens any folder in a new window (`code .` equivalent;
+  `$HOME`/`/` never auto-load, marker-less folders prompt instead of loading).
 - **fuzzy-finder**: `Ctrl+P` quick-open dialog listing every file under the
   folder loaded in project-mode (gitignore-aware), with subsequence filtering.
   Soft-depends on project-mode at runtime: with no folder loaded it prompts

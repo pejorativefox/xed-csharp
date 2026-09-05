@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 
 _XED_LIBDIRS = (
@@ -114,6 +115,141 @@ def _pick_icon(candidates: tuple[str, ...]) -> str:
     return candidates[0]
 
 
+#: One-shot handoff written by the `xed-code` launcher: the folder xed-code
+#: was pointed at. Read once per window activation, then consumed (deleted),
+#: so it acts as launch intent — not as persisted state. Lives under the
+#: user cache dir because xed is single-instance: cwd/env of a `xed-code`
+#: invocation never reach an already-running xed process.
+PENDING_FILENAME = "pending-root"
+PENDING_MAX_AGE_S = 60
+
+#: Top-level names that mark a directory as a project worth auto-loading.
+_PROJECT_MARKER_NAMES = frozenset(
+    {
+        ".git",
+        "package.json",
+        "Cargo.toml",
+        "go.mod",
+        "CMakeLists.txt",
+        "Makefile",
+        "meson.build",
+        "pyproject.toml",
+    }
+)
+
+#: Top-level suffixes that mark a directory as a project.
+_PROJECT_MARKER_SUFFIXES = (".sln", ".slnx", ".csproj")
+
+
+def _cache_dir() -> str:
+    if GLib is not None:
+        try:
+            return os.path.join(GLib.get_user_cache_dir(), "xed", "project-mode")
+        except Exception:
+            pass
+    return os.path.join(os.path.expanduser("~/.cache"), "xed", "project-mode")
+
+
+def pending_root_path(base: str | None = None) -> str:
+    """Path of the one-shot `xed-code` handoff file."""
+    return os.path.join(base or _cache_dir(), PENDING_FILENAME)
+
+
+def write_pending_root(folder: str, path: str | None = None) -> str | None:
+    """Record launch intent for the next window activation. Returns the path."""
+    target = path or pending_root_path()
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(os.path.abspath(folder) + "\n")
+    except OSError as e:
+        _debug(f"pending write failed: {e!r}")
+        return None
+    return target
+
+
+def take_pending_root(
+    path: str | None = None,
+    max_age_s: int = PENDING_MAX_AGE_S,
+    now: float | None = None,
+) -> str | None:
+    """Read and consume the `xed-code` handoff (fresh entries only).
+
+    Always unlinks the file when present so one launch never affects a
+    later window. Returns the abspath, or None when missing/stale/empty.
+    """
+    target = path or pending_root_path()
+    try:
+        mtime = os.path.getmtime(target)
+    except OSError:
+        return None
+    try:
+        with open(target, encoding="utf-8") as f:
+            content = f.read().strip()
+    except OSError:
+        content = ""
+    try:
+        os.unlink(target)
+    except OSError as e:
+        _debug(f"pending consume failed: {e!r}")
+    moment = time.time() if now is None else now
+    if moment - mtime > max_age_s or not content:
+        return None
+    return os.path.abspath(content)
+
+
+def has_project_markers(folder: str) -> bool:
+    """True when folder's top level looks like a project (no recursion)."""
+    try:
+        entries = os.scandir(folder)
+    except OSError:
+        return False
+    with entries:
+        for entry in entries:
+            name = entry.name
+            lowered = name.lower()
+            if lowered in _PROJECT_MARKER_NAMES:
+                return True
+            if lowered.endswith(_PROJECT_MARKER_SUFFIXES):
+                return True
+    return False
+
+
+def is_unsafe_root(folder: str) -> bool:
+    """True for $HOME, anything above it, or / — never auto-load these."""
+    try:
+        real = os.path.realpath(os.path.abspath(folder))
+        home = os.path.realpath(os.path.expanduser("~"))
+        return real == home or real == os.path.dirname(home) or real == "/"
+    except Exception:
+        return True
+
+
+def resolve_startup_root(
+    cwd: str | None, pending: str | None
+) -> tuple[str, str | None]:
+    """Decide the startup folder: ("load"|"prompt"|"none", dir|None).
+
+    Explicit `xed-code` intent (pending) with no markers still prompts;
+    an incidental cwd without markers (or any unsafe root reached via cwd)
+    is silently ignored so plain `xed` from $HOME never crawls or nags.
+    """
+    if pending:
+        candidate = os.path.abspath(pending)
+        if not os.path.isdir(candidate):
+            return ("none", None)
+        if is_unsafe_root(candidate) or not has_project_markers(candidate):
+            return ("prompt", candidate)
+        return ("load", candidate)
+    if cwd:
+        candidate = os.path.abspath(cwd)
+        if not os.path.isdir(candidate) or is_unsafe_root(candidate):
+            return ("none", None)
+        if has_project_markers(candidate):
+            return ("load", candidate)
+    return ("none", None)
+
+
 @dataclass
 class FileNode:
     name: str
@@ -163,7 +299,7 @@ try:
     gi.require_version("Gdk", "3.0")
     gi.require_version("Xed", "1.0")
 
-    from gi.repository import GObject, Gtk, Gdk, Gio, Xed  # type: ignore
+    from gi.repository import GObject, Gtk, Gdk, Gio, GLib, Xed  # type: ignore
 except Exception:
     class _DummyObject:
         def __init__(self, *args, **kwargs) -> None:
@@ -190,7 +326,7 @@ except Exception:
 
     GObject = _DummyGObject  # type: ignore[no-redef]
     Xed = _DummyXed  # type: ignore[no-redef]
-    Gtk = Gio = Gdk = None  # type: ignore[no-redef]
+    Gtk = Gio = Gdk = GLib = None  # type: ignore[no-redef]
 
 
 if Gtk is not None:
@@ -325,6 +461,8 @@ class ProjectModePlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
             _debug(f"window keys connect failed: {e!r}")
             self._window_key_id = None
 
+        self._startup_load()
+
     def do_deactivate(self) -> None:
         if self._window_key_id is not None:
             try:
@@ -378,7 +516,48 @@ class ProjectModePlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
             return False
         return self._handle_global_key(keyname, ctrl, shift, alt)
 
-    def _choose_root(self) -> None:
+    def _startup_load(self) -> None:
+        """Load a project folder at window startup (`code .` equivalent).
+
+        Prefers explicit `xed-code` intent (one-shot handoff file), falls
+        back to xed's cwd on cold start. Marker-less or unsafe candidates
+        never auto-load; explicit ones prompt instead. Soft-only throughout.
+        """
+        try:
+            pending = take_pending_root()
+        except Exception as e:
+            _debug(f"pending read failed: {e!r}")
+            pending = None
+        try:
+            cwd = os.getcwd()
+        except Exception:
+            cwd = None
+        try:
+            action, folder = resolve_startup_root(cwd, pending)
+        except Exception as e:
+            _debug(f"startup resolve failed: {e!r}")
+            return
+        if action == "load" and folder:
+            _debug(f"startup: auto-loading {folder}")
+            self._set_root(folder)
+        elif action == "prompt" and folder:
+            _debug(f"startup: prompting for {folder}")
+            try:
+                if GLib is not None:
+                    GLib.idle_add(self._prompt_startup_root, folder)
+                else:
+                    self._prompt_startup_root(folder)
+            except Exception as e:
+                _debug(f"startup prompt failed: {e!r}")
+
+    def _prompt_startup_root(self, folder: str) -> bool:
+        try:
+            self._choose_root(initial_folder=folder)
+        except Exception as e:
+            _debug(f"startup chooser failed: {e!r}")
+        return False
+
+    def _choose_root(self, initial_folder: str | None = None) -> None:
         if Gtk is None:
             return
         try:
@@ -386,6 +565,11 @@ class ProjectModePlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
                 title="Open Folder",
                 action=Gtk.FileChooserAction.SELECT_FOLDER,
             )
+            if initial_folder and os.path.isdir(initial_folder):
+                try:
+                    dialog.set_current_folder(initial_folder)
+                except Exception:
+                    pass
             try:
                 dialog.set_transient_for(self.window)
                 dialog.set_modal(True)

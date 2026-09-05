@@ -1,0 +1,76 @@
+#!/usr/bin/env python3
+"""Open a project folder in xed: the `code .` equivalent.
+
+Writes the target folder to project-mode's one-shot handoff file, then
+opens a new xed window (xed is single-instance, so cwd/env of this command
+never reach an already-running process — the handoff file carries the
+intent). The newly opened window auto-loads the folder when it looks like
+a project, or prompts with the folder chooser otherwise. The handoff is
+consumed on read: it never persists and never affects later windows.
+
+Usage:
+    xed-code [folder]   # default: current directory
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+
+USAGE = "usage: xed-code [folder]"
+
+
+def _pending_path() -> str:
+    base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".cache"
+    )
+    return os.path.join(base, "xed", "project-mode", "pending-root")
+
+
+def resolve_target(argv: list[str]) -> str | None:
+    """Target folder from CLI args (None on --help/--version)."""
+    args = [a for a in argv[1:] if a not in ("--new-window",)]
+    if not args:
+        return os.path.abspath(".")
+    if args[0] in ("-h", "--help", "--version"):
+        return None
+    return os.path.abspath(args[0])
+
+
+def launch(target: str) -> int:
+    """Record intent and open a new xed window there. Returns exit code."""
+    if not os.path.isdir(target):
+        print(f"xed-code: not a folder: {target}", file=sys.stderr)
+        return 2
+    pending = _pending_path()
+    try:
+        os.makedirs(os.path.dirname(pending), exist_ok=True)
+        with open(pending, "w", encoding="utf-8") as f:
+            f.write(target + "\n")
+    except OSError as exc:
+        print(f"xed-code: failed to record folder: {exc}", file=sys.stderr)
+        return 1
+    try:
+        # cwd=target also gives cold-started plugins (e.g. Roslyn solution
+        # discovery) the right working directory.
+        subprocess.run(["xed", "--new-window"], cwd=target, check=False)
+    except FileNotFoundError:
+        print("xed-code: xed not on PATH", file=sys.stderr)
+        return 127
+    except OSError as exc:
+        print(f"xed-code: failed to launch xed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    target = resolve_target(argv)
+    if target is None:
+        print(USAGE)
+        return 0
+    return launch(target)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
