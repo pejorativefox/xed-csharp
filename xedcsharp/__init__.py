@@ -247,10 +247,39 @@ def _gio_file_path(location) -> str | None:
         return None
 
 
-def _add_to_panel(panel, widget, name: str, title: str) -> bool:
+PANEL_ICONS = {
+    "solution": ("folder", "package-x-generic", "text-x-generic"),
+    "tests": ("applications-science", "system-run", "dialog-information"),
+    "output": ("utilities-terminal", "text-x-generic", "dialog-information"),
+    "debug": ("media-playback-start", "system-run", "dialog-information"),
+}
+
+
+def _pick_panel_icon(candidates) -> str:
+    """First installed icon name (names verified against Adwaita/Legacy)."""
+    try:
+        from gi.repository import Gtk as _Gtk
+
+        theme = _Gtk.IconTheme.get_default()
+        if theme is not None:
+            for name in candidates:
+                try:
+                    if theme.has_icon(name):
+                        return name
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return candidates[0]
+
+
+def _add_to_panel(panel, widget, title: str, icon_key: str) -> bool:
+    # XedPanel.add_item(item, name, icon_name): name and icon are what the
+    # tab shows. Passing anything else as icon_name renders the broken-image
+    # placeholder (circle with a cross).
+    icon = _pick_panel_icon(PANEL_ICONS.get(icon_key, ("dialog-information",)))
     for attempt in (
-        lambda: panel.add_item(widget, name, title),
-        lambda: panel.add_item(widget, name, title, None),
+        lambda: panel.add_item(widget, title, icon),
         lambda: panel.add(widget),
     ):
         try:
@@ -326,14 +355,14 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         side = self._safe(lambda: self.window.get_side_panel())
         bottom = self._safe(lambda: self.window.get_bottom_panel())
         if side is not None:
-            if self.explorer is not None and not _add_to_panel(side, self.explorer, "XedCSharpExplorer", "C# Solution"):
+            if self.explorer is not None and not _add_to_panel(side, self.explorer, "C# Solution", "solution"):
                 debug("side panel (explorer) add failed")
-            if self.testpanel is not None and not _add_to_panel(side, self.testpanel, "XedCSharpTests", "C# Tests"):
+            if self.testpanel is not None and not _add_to_panel(side, self.testpanel, "C# Tests", "tests"):
                 debug("side panel (tests) add failed")
         if bottom is not None:
-            if self.output is not None and not _add_to_panel(bottom, self.output, "XedCSharpOutput", "C# Output"):
+            if self.output is not None and not _add_to_panel(bottom, self.output, "C# Output", "output"):
                 debug("bottom panel (output) add failed")
-            if self.debugpanel is not None and not _add_to_panel(bottom, self.debugpanel, "XedCSharpDebug", "C# Debug"):
+            if self.debugpanel is not None and not _add_to_panel(bottom, self.debugpanel, "C# Debug", "debug"):
                 debug("bottom panel (debug) add failed")
         self._report_startup_deps()
 
