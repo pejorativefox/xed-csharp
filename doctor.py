@@ -7,7 +7,7 @@ Covers every failure mode seen in the wild so far:
 - missing libpeas python3 loader
 - missing dotnet / roslyn-language-server / netcoredbg
 - plugin not enabled in dconf
-- stale xed process swallowing XED_DEBUG_CSHARP (GApplication remote)
+- stale xed process swallowing XED_PLUGIN_DEBUG (GApplication remote)
 
 Usage: python3 doctor.py
 """
@@ -124,7 +124,7 @@ def main() -> int:
         "no stale xed process (env vars don't reach running instances)",
         not procs,
         f"xed is running ({procs}). Fully quit it (File -> Quit all windows) "
-        "then start with: XED_DEBUG_CSHARP=1 xed",
+        "then start with: XED_PLUGIN_DEBUG=1 xed",
         warn_only=True,
     )
 
@@ -137,8 +137,8 @@ def main() -> int:
         for line in lines[-5:]:
             print(f"  {line}")
     else:
-        print("no marker log yet; run with XED_DEBUG_CSHARP=1 to create it:")
-        print(f"  XED_DEBUG_CSHARP=1 xed   (after fully quitting xed)")
+        print("no marker log yet; run with XED_PLUGIN_DEBUG=1 to create it:")
+        print(f"  XED_PLUGIN_DEBUG=1 xed   (after fully quitting xed)")
 
     print()
     if failures:

@@ -40,30 +40,42 @@ Single multi-feature Python plugin (`Loader=python3`):
 | `F9` | Toggle breakpoint |
 | `F5` | Debug startup project |
 
+## Global shortcuts (Panel Hider plugin)
+
+| Keys | Action |
+| ---- | ------ |
+| `Ctrl+B` | Hide side + bottom panes |
+| `Ctrl+J` | Toggle bottom pane |
+| `Ctrl+E` | Toggle side pane |
+
 ## Layout
 
 ```
 plugins/
+  panel-hider/
+    panel-hider.plugin
+    panelhider/
+      __init__.py       # global pane hide/toggle shortcuts
   xedcsharp/
     xedcsharp.plugin    # Loader=python3, Module=xedcsharp, IAge=3
     xedcsharp/
       __init__.py       # Xed.WindowActivatable entry + wiring
-  views.py              # per-view tracker (sync, keys, menu, hover)
-  gscompletion.py       # Roslyn GtkSource.CompletionProvider (preferred)
-  completion.py         # completion popup (pure Gtk3, fallback only)
-  explorer.py           # solution explorer (side)
-  testpanel.py          # test explorer (side)
-  output.py             # output + problems (bottom)
-  debugpanel.py         # breakpoints/stack/variables (bottom)
-  solution.py           # sln/csproj discovery (no MSBuild parser)
-  dotnet_cli.py         # sync + streaming runners (headless-testable)
-  lsp_transport.py      # Content-Length JSON-RPC over stdio
-  roslyn.py             # Roslyn lifecycle + handshake
-  dap.py                # minimal DAP client for netcoredbg
-  breakpoints.py        # persistent breakpoint store
-  intelligence.py       # positions, completion/hover/location/edit helpers
-  testing.py / debugging.py
-  settings.py           # INI store, no GSettings schema
+      views.py          # per-view tracker (sync, keys, menu, hover)
+      gscompletion.py   # Roslyn GtkSource.CompletionProvider (preferred)
+      completion.py     # completion popup (pure Gtk3, fallback only)
+      explorer.py       # solution explorer (side)
+      testpanel.py      # test explorer (side)
+      output.py         # output + problems (bottom)
+      debugpanel.py     # breakpoints/stack/variables (bottom)
+      solution.py       # sln/csproj discovery (no MSBuild parser)
+      dotnet_cli.py     # sync + streaming runners (headless-testable)
+      lsp_transport.py  # Content-Length JSON-RPC over stdio
+      roslyn.py         # Roslyn lifecycle + handshake
+      dap.py            # minimal DAP client for netcoredbg
+      breakpoints.py    # persistent breakpoint store
+      intelligence.py   # positions, completion/hover/location/edit helpers
+      testing.py / debugging.py
+      settings.py       # INI store, no GSettings schema
 tests/                  # headless unit tests (no GTK, no pytest needed)
 ```
 
@@ -72,7 +84,7 @@ tests/                  # headless unit tests (no GTK, no pytest needed)
 ```bash
 ./install.sh
 # restart xed, enable Edit -> Preferences -> Plugins -> C# DevKit for xed
-XED_DEBUG_CSHARP=1 xed   # debug logs to stderr
+XED_PLUGIN_DEBUG=1 xed   # debug logs to stderr
 ```
 
 Requires: `xed 3.x`, `python3-gi`, `dotnet` SDK 9/10,
@@ -95,9 +107,9 @@ python3 doctor.py   # checks install, GI plumbing, toolchain, xed state
 Known causes, in order of likelihood:
 
 1. **Stale xed process.** `xed` is a single-instance GApplication: running
-   `XED_DEBUG_CSHARP=1 xed` while xed is already open just pings the old
+   `XED_PLUGIN_DEBUG=1 xed` while xed is already open just pings the old
    process — the env var never arrives and stderr goes nowhere useful.
-   Fully quit first (File → Quit all windows), then `XED_DEBUG_CSHARP=1 xed`.
+   Fully quit first (File → Quit all windows), then `XED_PLUGIN_DEBUG=1 xed`.
 2. **Side/bottom panes hidden.** New panels land in xed's side/bottom panes;
    show them via View → Side Pane / Bottom Pane.
 3. **Private typelib paths.** Some builds install `Xed-1.0.typelib` and
@@ -105,7 +117,7 @@ Known causes, in order of likelihood:
    *every* Python plugin (`ValueError: Namespace Xed not available`). The
    plugin self-registers xed's private dirs at import; if import still fails,
    the full traceback now goes to stderr instead of failing silently.
-4. **Proof of life.** With `XED_DEBUG_CSHARP=1`, the plugin appends to
+4. **Proof of life.** With `XED_PLUGIN_DEBUG=1`, the plugin appends to
    `/tmp/xedcsharp-<uid>.log` on import and activation — check it even when
    stderr is swallowed (desktop-menu launches log to the journal).
 5. **Roslyn server deaths.** The C# Output panel now shows the exit code plus

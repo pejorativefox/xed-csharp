@@ -1,0 +1,11 @@
+[Plugin]
+Loader=python3
+Module=panelhider
+IAge=3
+Name=Panel Hider
+Description=Global shortcuts for hiding and toggling xed side/bottom panels.
+Icon=view-list-tree
+Authors=xed-csharp contributors
+Copyright=Copyright © 2026 xed-csharp contributors
+Website=https://github.com/linuxmint/xed
+Version=0.1.0

@@ -1,4 +1,4 @@
-"""Shared debug logging gated by XED_DEBUG_CSHARP."""
+"""Shared debug logging gated by XED_PLUGIN_DEBUG."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import datetime
 import os
 import sys
 
-_DEBUG = os.environ.get("XED_DEBUG_CSHARP", "").strip().lower() not in (
+_DEBUG = os.environ.get("XED_PLUGIN_DEBUG", "").strip().lower() not in (
     "", "0", "false", "no", "off",
 )
 

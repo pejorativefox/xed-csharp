@@ -23,8 +23,7 @@ def _tracker():
 
 def _collect(tracker):
     fired: list = []
-    for signal in ("hide-panels", "toggle-bottom-panel", "toggle-side-panel",
-                   "fuzzy-finder", "open-folder"):
+    for signal in ("fuzzy-finder", "open-folder"):
         tracker.connect(signal, lambda _w, s=signal: fired.append(s))
     return fired
 
@@ -34,13 +33,9 @@ def test_global_keys_emit():
     if tracker is None:
         return
     fired = _collect(tracker)
-    assert tracker._handle_global_key("b", True, False, False) is True
-    assert tracker._handle_global_key("j", True, False, False) is True
-    assert tracker._handle_global_key("e", True, False, False) is True
     assert tracker._handle_global_key("p", True, False, False) is True
     assert tracker._handle_global_key("o", True, True, False) is True
-    assert fired == ["hide-panels", "toggle-bottom-panel", "toggle-side-panel",
-                     "fuzzy-finder", "open-folder"]
+    assert fired == ["fuzzy-finder", "open-folder"]
 
 
 def test_global_keys_reject_modifiers_and_plain():
@@ -48,9 +43,9 @@ def test_global_keys_reject_modifiers_and_plain():
     if tracker is None:
         return
     fired = _collect(tracker)
-    assert tracker._handle_global_key("b", False, False, False) is False
-    assert tracker._handle_global_key("b", True, True, False) is False
-    assert tracker._handle_global_key("b", True, False, True) is False
+    assert tracker._handle_global_key("p", False, False, False) is False
+    assert tracker._handle_global_key("p", True, True, False) is False
+    assert tracker._handle_global_key("p", True, False, True) is False
     assert tracker._handle_global_key("x", True, False, False) is False
     assert fired == []
 
@@ -64,10 +59,10 @@ def test_window_key_press_drives_globals():
     fired = _collect(tracker)
     event = types.SimpleNamespace(
         state=int(Gdk.ModifierType.CONTROL_MASK),
-        keyval=Gdk.keyval_from_name("b"),
+        keyval=Gdk.keyval_from_name("p"),
     )
     assert tracker._on_window_key_press(None, event) is True
-    assert fired == ["hide-panels"]
+    assert fired == ["fuzzy-finder"]
 
 
 def test_view_handler_ignores_globals():
@@ -79,7 +74,7 @@ def test_view_handler_ignores_globals():
     fired = _collect(tracker)
     event = types.SimpleNamespace(
         state=int(Gdk.ModifierType.CONTROL_MASK),
-        keyval=Gdk.keyval_from_name("b"),
+        keyval=Gdk.keyval_from_name("p"),
     )
     # No C# doc here; must not emit (window level owns these now).
     assert tracker._on_key_press(None, event, object()) is False
