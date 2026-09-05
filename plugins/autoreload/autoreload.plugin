@@ -1,0 +1,11 @@
+[Plugin]
+Loader=python3
+Module=autoreload
+IAge=3
+Name=Auto Reload
+Description=Silently reloads externally modified files that have no unsaved changes.
+Icon=view-refresh
+Authors=xed-csharp contributors
+Copyright=Copyright © 2026 xed-csharp contributors
+Website=https://github.com/linuxmint/xed
+Version=0.1.0

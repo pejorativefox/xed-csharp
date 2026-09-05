@@ -53,8 +53,16 @@ def launch(target: str) -> int:
         return 1
     try:
         # cwd=target also gives cold-started plugins (e.g. Roslyn solution
-        # discovery) the right working directory.
-        subprocess.run(["xed", "--new-window"], cwd=target, check=False)
+        # discovery) the right working directory. Detached like `code`:
+        # return immediately, no terminal hang, no Ctrl-C propagation.
+        subprocess.Popen(
+            ["xed", "--new-window"],
+            cwd=target,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
     except FileNotFoundError:
         print("xed-code: xed not on PATH", file=sys.stderr)
         return 127

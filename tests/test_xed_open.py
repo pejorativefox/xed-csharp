@@ -29,3 +29,31 @@ def test_open_location_missing_file():
     xed_open = _open_module()
     assert xed_open.open_location("/no/such/file.cs", 3) == 2
     assert xed_open.open_location("", None) == 2
+
+
+def test_open_location_returns_immediately_detached():
+    import subprocess
+    import tempfile
+
+    xed_open = _open_module()
+    calls = []
+    saved = subprocess.Popen
+
+    class FakePopen:
+        def __init__(self, argv, **kwargs):
+            calls.append((argv, kwargs))
+
+    subprocess.Popen = FakePopen
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".cs", delete=False) as f:
+            path = f.name
+        assert xed_open.open_location(path, 25) == 0
+    finally:
+        subprocess.Popen = saved
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == ["xed", "+25", path]
+    assert kwargs.get("start_new_session") is True
+    assert kwargs.get("stdin") == subprocess.DEVNULL
+    assert kwargs.get("stdout") == subprocess.DEVNULL
+    assert kwargs.get("stderr") == subprocess.DEVNULL

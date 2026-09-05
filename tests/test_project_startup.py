@@ -197,18 +197,19 @@ def test_code_launch_records_pending_and_opens_new_window():
         target = os.path.join(tmp, "proj")
         os.makedirs(target)
         calls = []
-        saved_run = xed_code.subprocess.run
+        saved_popen = xed_code.subprocess.Popen
         saved_env = dict(os.environ)
-        xed_code.subprocess.run = lambda argv, **kw: calls.append((argv, kw)) or types.SimpleNamespace(returncode=0)
+        xed_code.subprocess.Popen = lambda argv, **kw: calls.append((argv, kw))
         os.environ["XDG_CACHE_HOME"] = cache
         try:
             assert xed_code.launch(target) == 0
         finally:
-            xed_code.subprocess.run = saved_run
+            xed_code.subprocess.Popen = saved_popen
             os.environ.clear()
             os.environ.update(saved_env)
         assert calls and calls[0][0] == ["xed", "--new-window"]
         assert calls[0][1].get("cwd") == target
+        assert calls[0][1].get("start_new_session") is True
         pending = os.path.join(cache, "xed", "project-mode", "pending-root")
         with open(pending, encoding="utf-8") as f:
             assert f.read().strip() == target
