@@ -29,6 +29,51 @@ _XED_LIBDIRS = (
 
 _REFRESH_DEBOUNCE_MS = 300
 
+def tab_state_name(state) -> str:
+    """Normalized Xed.TabState name for a raw `get_state()` value.
+
+    Real GI enums stringify to ints (`str(STATE_SAVING) == "3"`), so
+    substring checks for "SAVING"/"NORMAL" on `str()` never match in
+    production. Prefer `value_name` (`XED_TAB_STATE_SAVING`), then
+    `value_nick` (`state-saving`), then bare ints (0 == NORMAL,
+    3 == SAVING — stable xed/gedit ABI values). Plain strings (tests,
+    older bindings) pass through unchanged. Headless-safe.
+    """
+    try:
+        name = getattr(state, "value_name", None)
+        if isinstance(name, str) and name:
+            return name
+    except Exception:
+        pass
+    try:
+        nick = getattr(state, "value_nick", None)
+        if isinstance(nick, str) and nick:
+            return nick
+    except Exception:
+        pass
+    try:
+        num = int(state)  # type: ignore[arg-type]
+    except Exception:
+        num = None
+    if num == 0:
+        return "XED_TAB_STATE_NORMAL"
+    if num == 3:
+        return "XED_TAB_STATE_SAVING"
+    try:
+        return str(state)
+    except Exception:
+        return ""
+
+
+def is_save_completed(previous, current) -> bool:
+    """True on a SAVING -> NORMAL tab-state transition (save done)."""
+    try:
+        prev = tab_state_name(previous).upper()
+        cur = tab_state_name(current).upper()
+    except Exception:
+        return False
+    return "SAVING" in prev and "ERROR" not in prev and cur.endswith("NORMAL")
+
 
 def _ensure_xed_gi_paths() -> None:
     try:
@@ -455,7 +500,7 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
         if tab is None:
             return
         try:
-            state = str(tab.get_state())
+            state = tab_state_name(tab.get_state())
         except Exception:
             return
         try:
@@ -464,7 +509,7 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
             return
         previous = self._tab_states.get(key, "")
         self._tab_states[key] = state
-        if "SAVING" in previous and state.endswith("NORMAL"):
+        if is_save_completed(previous, state):
             try:
                 path = doc_path(tab.get_document())
             except Exception:

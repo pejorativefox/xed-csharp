@@ -35,7 +35,9 @@ and edit.
    (`Shift+Alt+F`) and quick fixes (`Alt+Enter`).
 
 **Built-in terminal** (tabbed-terminal)
-- A terminal in xed's bottom panel, with tabs.
+- A terminal in xed's bottom panel, with tabs: `Ctrl+Shift+T` opens a
+  new terminal tab, `Ctrl+Shift+W` closes one, `` Ctrl+` `` jumps focus
+  to the terminal and back.
 
 **Less clutter** (panel-hider + feature-toggle)
 - `Ctrl+B` hides side and bottom panes for distraction-free editing,
@@ -43,6 +45,19 @@ and edit.
 - Hides the built-in Documents list and closes the empty
   "Unsaved Document 1" tab xed starts with (both can be switched back
   off in the settings file if you miss them).
+
+**Tab switching** (keybinds)
+- `Ctrl+PageDown` jumps to the next tab, `Ctrl+PageUp` to the previous
+  one, wrapping around at either end.
+
+**Auto-reload** (autoreload)
+- Files changed by another program (a build, a git checkout) reload on
+  their own — but only when you have no unsaved edits, so your work is
+  never overwritten.
+
+**Word highlighting** (occurrences-highlight)
+- Every occurrence of the word under your cursor lights up in the
+  editor, with matching ticks in the ruler for quick scanning.
 
 **Small helpers**
 - `xed-open 'file.cs:line:col'` opens a file at an exact position —
@@ -68,7 +83,8 @@ Now **fully quit xed** (File → Quit all windows — important, see below),
 start it again, and enable what you want under
 Edit → Preferences → Plugins:
 C# DevKit for xed, project-mode, fuzzy-finder, feature-toggle,
-panel-hider, tabbed-terminal, git-inline-diff.
+panel-hider, tabbed-terminal, git-inline-diff, keybinds, autoreload,
+occurrences-highlight.
 
 ## Everyday shortcuts
 
@@ -78,6 +94,9 @@ panel-hider, tabbed-terminal, git-inline-diff.
 | `Ctrl+P` | Quickly open any file in the project |
 | `Ctrl+B` | Hide/show all panes (focus mode) |
 | `Ctrl+J` / `Ctrl+E` | Toggle bottom / side pane |
+| `Ctrl+PageUp` / `Ctrl+PageDown` | Previous / next tab |
+| `Ctrl+Shift+T` / `Ctrl+Shift+W` | New / close terminal tab |
+| `` Ctrl+` `` | Jump focus to the terminal and back |
 | `Ctrl+Space` | Code completions (C#) |
 | `F12` / `Shift+F12` | Go to definition / find references (C#) |
 | `Alt+Enter` | Quick fix for the error at the cursor (C#) |
@@ -106,7 +125,7 @@ The usual culprits:
 
 If you report a problem, run `XED_PLUGIN_DEBUG=1 xed` from a terminal
 (after fully quitting first) and include any lines starting with
-`[project-mode]`, `[git-inline-diff]`, or `[xed-csharp]`.
+`[project-mode]`, `[git-inline-diff]`, `[keybinds]`, or `[xed-csharp]`.
 
 ## For developers
 

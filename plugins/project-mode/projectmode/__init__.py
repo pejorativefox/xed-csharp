@@ -294,9 +294,12 @@ GIT_REFRESH_MIN_INTERVAL_S = 10.0
 #: without hammering the disk during bursts (e.g. `git checkout`).
 TREE_REFRESH_DEBOUNCE_MS = 800
 
-#: Cap on recursive directory watches (inotify handles). Beyond this we
-#: watch the top level only and rely on the debounced rebuild.
-MAX_WATCH_DIRS = 250
+#: Cap on recursive directory watches (inotify handles). Sized for mid-size
+#: repos (a 2600-dir checkout needs every dir watched); still far below the
+#: typical 8k+ `max_user_watches` floor. Beyond the cap the shallowest dirs
+#: win (breadth-first, sorted), so overflow degrades to top-level coverage
+#: instead of an arbitrary DFS subset.
+MAX_WATCH_DIRS = 3000
 
 #: Relative paths inside `.git/` that genuinely change status output.
 #: Everything else (objects/, logs/, index.lock, *.tmp, …) is noise —
@@ -305,6 +308,52 @@ MAX_WATCH_DIRS = 250
 _GIT_RELEVANT_FILES = frozenset({"HEAD", "index", "packed-refs", "ORIG_HEAD", "FETCH_HEAD"})
 
 _GIT_NOISE_SUFFIXES = (".lock", ".tmp", ".swp", "~")
+
+
+def tab_state_name(state) -> str:
+    """Normalized Xed.TabState name for a raw `get_state()` value.
+
+    Real GI enums stringify to ints (`str(STATE_SAVING) == "3"`), so
+    substring checks for "SAVING"/"NORMAL" on `str()` never match in
+    production. Prefer `value_name` (`XED_TAB_STATE_SAVING`), then
+    `value_nick` (`state-saving`), then bare ints (0 == NORMAL,
+    3 == SAVING — stable xed/gedit ABI values). Plain strings (tests,
+    older bindings) pass through unchanged. Headless-safe.
+    """
+    try:
+        name = getattr(state, "value_name", None)
+        if isinstance(name, str) and name:
+            return name
+    except Exception:
+        pass
+    try:
+        nick = getattr(state, "value_nick", None)
+        if isinstance(nick, str) and nick:
+            return nick
+    except Exception:
+        pass
+    try:
+        num = int(state)  # type: ignore[arg-type]
+    except Exception:
+        num = None
+    if num == 0:
+        return "XED_TAB_STATE_NORMAL"
+    if num == 3:
+        return "XED_TAB_STATE_SAVING"
+    try:
+        return str(state)
+    except Exception:
+        return ""
+
+
+def is_save_completed(previous, current) -> bool:
+    """True on a SAVING -> NORMAL tab-state transition (save done)."""
+    try:
+        prev = tab_state_name(previous).upper()
+        cur = tab_state_name(current).upper()
+    except Exception:
+        return False
+    return "SAVING" in prev and "ERROR" not in prev and cur.endswith("NORMAL")
 
 
 def _rel_within(path: str, base: str) -> str | None:
@@ -325,6 +374,35 @@ def _rel_within(path: str, base: str) -> str | None:
     return rel
 
 
+def _enclosing_git_dir(root_dir: str) -> str:
+    """Absolute `.git` path for `root_dir` (headless-safe, no subprocess).
+
+    Walks up from `root_dir` so opening a subdirectory still resolves the
+    enclosing repo's `.git` — matching `git_monitor_target`. Falls back to
+    `root_dir/.git` when no ancestor carries one.
+    """
+    try:
+        walking = os.path.abspath(root_dir)
+    except Exception:
+        return os.path.join(str(root_dir), ".git")
+    fallback = os.path.join(walking, ".git")
+    try:
+        while True:
+            candidate = os.path.join(walking, ".git")
+            try:
+                if os.path.isdir(candidate) or os.path.isfile(candidate):
+                    return candidate
+            except Exception:
+                break
+            parent = os.path.dirname(walking)
+            if parent == walking:
+                break
+            walking = parent
+    except Exception:
+        pass
+    return fallback
+
+
 def should_refresh_for_git_event(
     root_dir: str,
     file_path: str | None,
@@ -338,7 +416,10 @@ def should_refresh_for_git_event(
       `git status` touching `index` cannot self-trigger a loop.
     - Events elsewhere under the root (top-level dir monitor) count —
       they may signal added/removed files.
-    - Events outside the root never count.
+    - Events outside the root never count, except inside the real `.git/`
+      — which lives above the root when a subdirectory is open (the
+      monitor watches the enclosing repo's `.git`, see
+      `git_monitor_target`).
     """
     try:
         candidates = [p for p in (file_path, other_path) if p]
@@ -346,14 +427,11 @@ def should_refresh_for_git_event(
             # Conservative: unknown file, but only if some monitor fired —
             # treat as relevant so we never miss a real change.
             return True
-        git_dir = os.path.join(os.path.abspath(root_dir), ".git")
+        git_dir = _enclosing_git_dir(root_dir)
         for candidate in candidates:
-            rel_root = _rel_within(candidate, root_dir)
-            if rel_root is None:
-                continue
-            if rel_root == ".git" or rel_root.startswith(".git" + os.sep):
-                rel_git = _rel_within(candidate, git_dir)
-                if rel_git is None or rel_git == "":
+            rel_git = _rel_within(candidate, git_dir)
+            if rel_git is not None:
+                if rel_git == "":
                     # The `.git` dir itself changed (e.g. created) — refresh.
                     return True
                 base = os.path.basename(rel_git)
@@ -363,6 +441,8 @@ def should_refresh_for_git_event(
                 if rel_git in _GIT_RELEVANT_FILES or first == "refs":
                     return True
                 # Noise inside .git (objects/logs/info/hooks/…) — ignore.
+                continue
+            if _rel_within(candidate, root_dir) is None:
                 continue
             # A real path under the project root changed.
             return True
@@ -405,23 +485,27 @@ def collect_watch_dirs(
 
     Mirrors build_file_tree pruning (hidden, _PRUNE_DIRS, symlinks) so we
     never watch build output or symlink farms. Always includes root_dir.
+    Breadth-first and sorted: when `max_dirs` still overflows, the
+    shallowest levels stay covered and the subset is deterministic.
     """
     out: list[str] = []
     try:
         if not os.path.isdir(root_dir):
             return out
         out.append(os.path.abspath(root_dir))
-        stack: list[tuple[str, int]] = [(os.path.abspath(root_dir), 0)]
-        while stack:
-            current, depth = stack.pop()
+        queue: list[tuple[str, int]] = [(os.path.abspath(root_dir), 0)]
+        while queue:
+            current, depth = queue.pop(0)
             if depth >= max_depth or len(out) >= max_dirs:
                 continue
             try:
                 with os.scandir(current) as entries:
-                    for entry in entries:
+                    children = sorted(
+                        (e for e in entries if e.is_dir(follow_symlinks=False)),
+                        key=lambda e: e.name,
+                    )
+                    for entry in children:
                         try:
-                            if not entry.is_dir(follow_symlinks=False):
-                                continue
                             name = entry.name
                             if name.startswith("."):
                                 continue
@@ -435,7 +519,7 @@ def collect_watch_dirs(
                             out.append(path)
                             if len(out) >= max_dirs:
                                 break
-                            stack.append((path, depth + 1))
+                            queue.append((path, depth + 1))
                         except OSError:
                             continue
             except OSError:
@@ -1541,7 +1625,7 @@ class ProjectModePlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
         except Exception:
             return
         try:
-            states[hash(tab)] = str(tab.get_state())
+            states[hash(tab)] = tab_state_name(tab.get_state())
         except Exception:
             pass
         try:
@@ -1574,7 +1658,7 @@ class ProjectModePlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
         if tab is None:
             return
         try:
-            state = str(tab.get_state())
+            state = tab_state_name(tab.get_state())
         except Exception:
             return
         try:
@@ -1586,7 +1670,7 @@ class ProjectModePlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
             self._tab_states[key] = state
         except Exception:
             previous = ""
-        if "SAVING" in previous and state.endswith("NORMAL"):
+        if is_save_completed(previous, state):
             try:
                 self._refresh_browser_for_path(self._project_saved_path(tab))
             except Exception:

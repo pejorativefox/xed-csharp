@@ -273,3 +273,96 @@ def test_git_monitor_target_falls_back_without_repo():
     with tempfile.TemporaryDirectory() as tmp:
         assert projectmode.git_monitor_target(tmp) == os.path.join(tmp, ".git")
         assert projectmode.git_monitor_target("") is None
+
+class _FakeEnumState:
+    """Mimics a real GI Xed.TabState: str() is an int, names are rich."""
+
+    def __init__(self, num, name, nick):
+        self._num = num
+        self.value_name = name
+        self.value_nick = nick
+
+    def __str__(self):
+        return str(self._num)
+
+    def __int__(self):
+        return self._num
+
+
+FAKE_SAVING = _FakeEnumState(3, "XED_TAB_STATE_SAVING", "state-saving")
+FAKE_NORMAL = _FakeEnumState(0, "XED_TAB_STATE_NORMAL", "state-normal")
+FAKE_SAVING_ERROR = _FakeEnumState(10, "XED_TAB_STATE_SAVING_ERROR", "state-saving-error")
+
+
+def test_tab_state_name_handles_real_gi_enums():
+    # Regression: str(STATE_SAVING) == "3" in production, so substring
+    # checks on str() never matched and save refresh never fired.
+    assert projectmode.tab_state_name(FAKE_SAVING) == "XED_TAB_STATE_SAVING"
+    assert projectmode.tab_state_name(FAKE_NORMAL) == "XED_TAB_STATE_NORMAL"
+    assert projectmode.tab_state_name("XED_TAB_STATE_SAVING") == "XED_TAB_STATE_SAVING"
+    assert projectmode.tab_state_name(3) == "XED_TAB_STATE_SAVING"
+    assert projectmode.tab_state_name(0) == "XED_TAB_STATE_NORMAL"
+
+
+def test_is_save_completed_transitions():
+    assert projectmode.is_save_completed(FAKE_SAVING, FAKE_NORMAL) is True
+    assert projectmode.is_save_completed("XED_TAB_STATE_SAVING", "XED_TAB_STATE_NORMAL") is True
+    assert projectmode.is_save_completed(3, 0) is True
+    assert projectmode.is_save_completed(FAKE_NORMAL, FAKE_NORMAL) is False
+    assert projectmode.is_save_completed(FAKE_SAVING_ERROR, FAKE_NORMAL) is False
+    assert projectmode.is_save_completed("", FAKE_NORMAL) is False
+
+
+def test_save_with_gi_enum_state_arms_refresh():
+    """End-to-end: handler sees GI enums (not test strings) on save."""
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, "a.txt")
+        with open(target, "w") as f:
+            f.write("x")
+        git_calls, tree_calls = [], []
+        plugin = _save_plugin(tmp, git_calls, tree_calls)
+        window = types.SimpleNamespace()
+
+        class _EnumTab(_FakeSaveTab):
+            def get_state(self):
+                return self._state
+
+        tab = _EnumTab(FAKE_SAVING, target)
+        plugin._tab_states[hash(tab)] = projectmode.tab_state_name(FAKE_SAVING)
+        tab._state = FAKE_NORMAL
+        plugin._on_project_tab_state_changed(window, tab)
+        assert git_calls == [(projectmode.GIT_DIR_DEBOUNCE_MS, 3, 0.0)]
+        assert tree_calls == [(projectmode.TREE_REFRESH_DEBOUNCE_MS, 7)]
+
+
+def test_git_event_filter_resolves_subdir_root():
+    """Events in the real .git count when a subdirectory is open."""
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, ".git", "refs", "heads"))
+        os.makedirs(os.path.join(tmp, "src", "deep"))
+        head = os.path.join(tmp, ".git", "refs", "heads", "main")
+        with open(head, "w") as f:
+            f.write("x")
+        sub = os.path.join(tmp, "src", "deep")
+        assert projectmode.should_refresh_for_git_event(sub, head) is True
+        noise = os.path.join(tmp, ".git", "objects", "ab", "cdef")
+        os.makedirs(os.path.dirname(noise))
+        with open(noise, "w") as f:
+            f.write("x")
+        assert projectmode.should_refresh_for_git_event(sub, noise) is False
+        assert projectmode.should_refresh_for_git_event(sub, os.path.join(sub, "a.cs")) is True
+        assert projectmode.should_refresh_for_git_event(sub, "/other/f") is False
+
+
+def test_collect_watch_dirs_is_breadth_first():
+    with tempfile.TemporaryDirectory() as tmp:
+        os.makedirs(os.path.join(tmp, "a", "deep", "deeper"))
+        os.makedirs(os.path.join(tmp, "b"))
+        full = projectmode.collect_watch_dirs(tmp)
+        assert os.path.abspath(tmp) in full
+        assert os.path.join(os.path.abspath(tmp), "a", "deep", "deeper") in full
+        # With room for only 3 dirs, the shallowest levels win.
+        tight = projectmode.collect_watch_dirs(tmp, max_dirs=3)
+        assert tight[0] == os.path.abspath(tmp)
+        assert os.path.join(os.path.abspath(tmp), "a") in tight
+        assert os.path.join(os.path.abspath(tmp), "b") in tight

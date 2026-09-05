@@ -465,3 +465,26 @@ def test_apply_result_removes_stale_marks():
     assert buf.get_source_marks_at_line(0, None) == []
     plugin._apply_result("/tmp/x.cs", {"added": [1], "modified": [], "deleted": []}, 0)
     assert len(buf.get_source_marks_at_line(1, None)) == 1
+
+
+def test_tab_state_helpers_detect_gi_enum_save():
+    """Regression: str(STATE_SAVING) == "3", so str() checks never fired."""
+
+    class _Enum:
+        def __init__(self, num, name, nick):
+            self._num = num
+            self.value_name = name
+            self.value_nick = nick
+
+        def __str__(self):
+            return str(self._num)
+
+        def __int__(self):
+            return self._num
+
+    saving = _Enum(3, "XED_TAB_STATE_SAVING", "state-saving")
+    normal = _Enum(0, "XED_TAB_STATE_NORMAL", "state-normal")
+    assert gitinline.tab_state_name(saving) == "XED_TAB_STATE_SAVING"
+    assert gitinline.is_save_completed(saving, normal) is True
+    assert gitinline.is_save_completed(normal, normal) is False
+    assert gitinline.is_save_completed("XED_TAB_STATE_SAVING", "XED_TAB_STATE_NORMAL") is True
