@@ -118,3 +118,94 @@ def test_window_key_press_drives_handler():
     cls = tabbedterminal.TabbedTerminalPlugin
     assert types.MethodType(cls._on_window_key_press, ns)(None, event) is True
     assert called and called[0][0] == "t"
+
+
+def _style_xml_colors():
+    import xml.etree.ElementTree as ET
+
+    path = os.path.join(os.path.dirname(__file__), "..", "styles", "atom-one-dark.xml")
+    root = ET.parse(path).getroot()
+    return {c.get("name"): (c.get("value") or "").upper() for c in root.iter("color")}
+
+
+def test_atom_theme_matches_style_xml():
+    xml = _style_xml_colors()
+    theme = tabbedterminal.atom_one_dark_theme()
+    assert theme["fg"] == xml["fg"]
+    assert theme["bg"] == xml["bg"]
+    assert theme["cursor"] == xml["cursor"]
+    assert theme["highlight"] == xml["selection"]
+    assert theme["palette"] == [
+        xml["bg"], xml["red"], xml["green"], xml["yellow"],
+        xml["blue"], xml["purple"], xml["cyan"], xml["fg"],
+        xml["comment"], xml["red"], xml["green"], xml["yellow"],
+        xml["blue"], xml["purple"], xml["cyan"], xml["white"],
+    ]
+
+
+def test_atom_theme_returns_fresh_copy():
+    first = tabbedterminal.atom_one_dark_theme()
+    first["palette"].append("#000000")
+    assert len(tabbedterminal.atom_one_dark_theme()["palette"]) == 16
+
+
+def test_palette_from_scheme_colors_fills_missing():
+    palette = tabbedterminal.palette_from_scheme_colors({"fg": "#111111", "bg": "#222222"})
+    assert len(palette) == 16
+    assert palette[0] == "#222222"
+    assert palette[7] == "#111111"
+    assert palette[1] == "#111111"  # missing red falls back to fg
+
+
+def test_build_vte_theme_none_without_text_colors():
+    assert tabbedterminal.build_vte_theme(None) is None
+    assert tabbedterminal.build_vte_theme({}) is None
+    # tango/xed-style schemes inherit the GTK theme: keep VTE defaults.
+    assert tabbedterminal.build_vte_theme({"gray": "#888A85"}) is None
+
+
+def test_build_vte_theme_maps_roles_to_ansi():
+    colors = {
+        "fg": "#ABB2BF", "bg": "#282C34", "cursor": "#528BFF",
+        "selection": "#3E4451", "gray": "#5C6370", "red": "#E06C75",
+        "green": "#98C379", "yellow": "#E5C07B", "blue": "#61AFEF",
+        "magenta": "#C678DD", "cyan": "#56B6C2", "white": "#DCDFE4",
+    }
+    assert tabbedterminal.build_vte_theme(colors) == tabbedterminal.atom_one_dark_theme()
+
+
+def test_apply_theme_rejects_bad_input_without_display():
+    assert tabbedterminal.apply_theme_to_terminal(None, None) is False
+    assert tabbedterminal.apply_theme_to_terminal(None, {"palette": []}) is False
+    theme = tabbedterminal.atom_one_dark_theme()
+    theme["palette"] = theme["palette"][:8]
+    assert tabbedterminal.apply_theme_to_terminal(object(), theme) is False
+
+
+def test_extract_atom_scheme_end_to_end():
+    if tabbedterminal.GtkSource is None:
+        print("SKIP scheme extraction test (no GtkSource)")
+        return
+    from gi.repository import GtkSource
+
+    manager = GtkSource.StyleSchemeManager.get_default()
+    repo_styles = os.path.join(os.path.dirname(__file__), "..", "styles")
+    try:
+        if repo_styles not in (manager.get_search_path() or []):
+            manager.append_search_path(repo_styles)
+    except Exception:
+        pass
+    colors = tabbedterminal.extract_scheme_colors("atom-one-dark")
+    assert colors and colors["fg"] == "#ABB2BF" and colors["bg"] == "#282C34"
+    assert tabbedterminal.build_vte_theme(colors) == tabbedterminal.atom_one_dark_theme()
+
+
+def test_current_theme_follows_editor_scheme():
+    if tabbedterminal.GtkSource is None:
+        print("SKIP follow-editor test (no GtkSource)")
+        return
+    if tabbedterminal.current_scheme_id() != "atom-one-dark":
+        print("SKIP follow-editor test (editor scheme is not atom-one-dark)")
+        return
+    theme = tabbedterminal.current_editor_theme()
+    assert theme == tabbedterminal.atom_one_dark_theme()

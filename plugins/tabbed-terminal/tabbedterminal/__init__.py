@@ -29,6 +29,122 @@ PANEL_ICONS = ("utilities-terminal", "terminal", "dialog-information")
 SHELL_ARGV = ["/bin/bash"]
 BASE_LABEL = "Terminal"
 
+SCHEME_SETTINGS_SCHEMA = "org.x.editor.preferences.editor"
+SCHEME_SETTINGS_KEY = "scheme"
+ATOM_SCHEME_ID = "atom-one-dark"
+
+#: Hardcoded Atom One Dark terminal theme. Mirrors styles/atom-one-dark.xml
+#: (bg/fg/cursor/selection + red/green/yellow/blue/purple/cyan/comment/white).
+#: Used when GtkSource is unavailable and as a test oracle for the XML file.
+ATOM_ONE_DARK = {
+    "fg": "#ABB2BF",
+    "bg": "#282C34",
+    "cursor": "#528BFF",
+    "highlight": "#3E4451",
+    # 16 ANSI entries: 0-7 normal, 8-15 bright.
+    "palette": [
+        "#282C34",  # 0 black (bg)
+        "#E06C75",  # 1 red
+        "#98C379",  # 2 green
+        "#E5C07B",  # 3 yellow
+        "#61AFEF",  # 4 blue
+        "#C678DD",  # 5 magenta (purple)
+        "#56B6C2",  # 6 cyan
+        "#ABB2BF",  # 7 white (fg)
+        "#5C6370",  # 8 bright black (comment)
+        "#E06C75",  # 9 bright red
+        "#98C379",  # 10 bright green
+        "#E5C07B",  # 11 bright yellow
+        "#61AFEF",  # 12 bright blue
+        "#C678DD",  # 13 bright magenta
+        "#56B6C2",  # 14 bright cyan
+        "#DCDFE4",  # 15 bright white
+    ],
+}
+
+#: Scheme style names mapped to terminal roles. Tuples are tried in order
+#: (foreground unless noted). "orange" (def:number) has no ANSI slot and is
+#: intentionally unused. Pure data, headless-safe.
+SCHEME_STYLE_MAP = {
+    "fg": (("text", "foreground"),),
+    "bg": (("text", "background"),),
+    "cursor": (("cursor", "foreground"),),
+    "selection": (("selection", "background"),),
+    "gray": (("def:comment", "foreground"),),
+    "red": (
+        ("def:preprocessor", "foreground"),
+        ("def:identifier", "foreground"),
+        ("def:error", "background"),
+    ),
+    "green": (("def:string", "foreground"),),
+    "yellow": (("def:type", "foreground"),),
+    "blue": (("def:function", "foreground"),),
+    "magenta": (("def:keyword", "foreground"),),
+    "cyan": (("def:operator", "foreground"),),
+    "white": (("def:error", "foreground"),),
+}
+
+
+def atom_one_dark_theme() -> dict:
+    """Atom One Dark VTE theme (fresh dict each call, headless-safe)."""
+    return {
+        "fg": ATOM_ONE_DARK["fg"],
+        "bg": ATOM_ONE_DARK["bg"],
+        "cursor": ATOM_ONE_DARK["cursor"],
+        "highlight": ATOM_ONE_DARK["highlight"],
+        "palette": list(ATOM_ONE_DARK["palette"]),
+    }
+
+
+def palette_from_scheme_colors(colors: dict) -> list[str]:
+    """Build a complete 16-entry ANSI palette from semantic scheme colors.
+
+    Missing entries fall back to fg/bg so the result is always complete.
+    Keys: bg, fg, red, green, yellow, blue, magenta, cyan, gray, white.
+    Pure logic, headless-safe.
+    """
+    fg = colors.get("fg") or "#FFFFFF"
+    bg = colors.get("bg") or "#000000"
+    red = colors.get("red") or fg
+    green = colors.get("green") or fg
+    yellow = colors.get("yellow") or fg
+    blue = colors.get("blue") or fg
+    magenta = colors.get("magenta") or fg
+    cyan = colors.get("cyan") or fg
+    gray = colors.get("gray") or fg
+    white = colors.get("white") or fg
+    return [
+        bg, red, green, yellow, blue, magenta, cyan, fg,
+        gray, red, green, yellow, blue, magenta, cyan, white,
+    ]
+
+
+def build_vte_theme(colors: dict | None) -> dict | None:
+    """Full VTE theme from extracted scheme colors, or None to keep defaults.
+
+    Returns None when the scheme defines no text fg/bg (e.g. tango/xed
+    inherit the GTK theme, which VTE already follows). Pure, headless-safe.
+    """
+    if not colors:
+        return None
+    fg = colors.get("fg")
+    bg = colors.get("bg")
+    if not fg and not bg:
+        return None
+    fg = fg or "#FFFFFF"
+    bg = bg or "#000000"
+    gray = colors.get("gray") or fg
+    merged = dict(colors)
+    merged["fg"] = fg
+    merged["bg"] = bg
+    return {
+        "fg": fg,
+        "bg": bg,
+        "cursor": colors.get("cursor") or fg,
+        "highlight": colors.get("selection") or gray,
+        "palette": palette_from_scheme_colors(merged),
+    }
+
 _BACKTICK_NAMES = frozenset({"grave", "quoteleft", "`", "asciigrave"})
 
 
@@ -131,6 +247,16 @@ try:
     from gi.repository import GObject, Gtk, Gdk, Gio, GLib, Xed, Pango  # type: ignore
 
     try:
+        gi.require_version("GtkSource", "4")
+        from gi.repository import GtkSource  # type: ignore
+    except Exception:
+        try:
+            gi.require_version("GtkSource", "3.0")
+            from gi.repository import GtkSource  # type: ignore
+        except Exception:
+            GtkSource = None  # type: ignore
+
+    try:
         gi.require_version("Vte", "2.91")
         from gi.repository import Vte  # type: ignore
     except Exception as _vte_err:
@@ -165,7 +291,7 @@ except Exception:
 
     GObject = _DummyGObject  # type: ignore[no-redef]
     Xed = _DummyXed  # type: ignore[no-redef]
-    Gtk = Gio = Gdk = GLib = Pango = Vte = None  # type: ignore[no-redef]
+    Gtk = Gio = Gdk = GLib = Pango = Vte = GtkSource = None  # type: ignore[no-redef]
 
 
 def _pick_icon(candidates: tuple[str, ...]) -> str:
@@ -183,6 +309,162 @@ def _pick_icon(candidates: tuple[str, ...]) -> str:
             except Exception:
                 continue
     return candidates[0]
+
+
+def _rgba_to_hex(rgba) -> str | None:
+    """Gdk.RGBA (or "#rrggbb" string) -> "#RRGGBB". None when unusable."""
+    try:
+        if isinstance(rgba, str):
+            text = rgba.strip()
+            if len(text) == 7 and text.startswith("#"):
+                int(text[1:], 16)
+                return text.upper()
+            return None
+        red = int(round(float(rgba.red) * 255))
+        green = int(round(float(rgba.green) * 255))
+        blue = int(round(float(rgba.blue) * 255))
+        clamp = lambda v: max(0, min(255, v))
+        return f"#{clamp(red):02X}{clamp(green):02X}{clamp(blue):02X}"
+    except Exception:
+        return None
+
+
+def current_scheme_id() -> str | None:
+    """xed's current editor color-scheme id (GSettings), or None if unknown."""
+    if Gio is None:
+        return None
+    try:
+        settings = Gio.Settings.new(SCHEME_SETTINGS_SCHEMA)
+        scheme_id = settings.get_string(SCHEME_SETTINGS_KEY)
+    except Exception as e:
+        _debug(f"editor scheme lookup failed: {e!r}")
+        return None
+    scheme_id = (scheme_id or "").strip()
+    return scheme_id or None
+
+
+def extract_scheme_colors(scheme_id: str):
+    """Semantic hex colors for a GtkSource style-scheme id.
+
+    Returns a dict of role -> "#RRGGBB" (missing roles omitted) or None
+    when GtkSource is unavailable or the scheme cannot be found.
+    """
+    if GtkSource is None:
+        return None
+    wanted = (scheme_id or "").strip()
+    if not wanted:
+        return None
+    try:
+        manager = GtkSource.StyleSchemeManager.get_default()
+    except Exception as e:
+        _debug(f"scheme manager unavailable: {e!r}")
+        return None
+    # xed ships its own styles dir (install.sh); make sure the in-process
+    # manager sees it even if xed hasn't appended it yet.
+    try:
+        seen = list(manager.get_search_path() or [])
+        styledir = os.environ.get("XED_STYLE_DIR") or os.path.expanduser(
+            "~/.local/share/xed/styles")
+        if styledir and styledir not in seen and os.path.isdir(styledir):
+            try:
+                manager.append_search_path(styledir)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        scheme = manager.get_scheme(wanted)
+    except Exception as e:
+        _debug(f"scheme lookup failed for {wanted!r}: {e!r}")
+        return None
+    if scheme is None:
+        _debug(f"scheme not found: {wanted!r}")
+        return None
+
+    def _lookup(style_name: str, kind: str) -> str | None:
+        try:
+            style = scheme.get_style(style_name)
+        except Exception:
+            return None
+        if style is None:
+            return None
+        try:
+            is_set = style.get_property(f"{kind}-set")
+        except Exception:
+            is_set = True
+        if not is_set:
+            return None
+        try:
+            rgba = style.get_property(kind)
+        except Exception:
+            return None
+        return _rgba_to_hex(rgba)
+
+    colors: dict[str, str] = {}
+    for role, candidates in SCHEME_STYLE_MAP.items():
+        for style_name, kind in candidates:
+            found = _lookup(style_name, kind)
+            if found:
+                colors[role] = found
+                break
+    return colors
+
+
+def current_editor_theme() -> dict | None:
+    """VTE theme dict for xed's current scheme, or None to keep VTE defaults.
+
+    Falls back to the hardcoded Atom One Dark theme when the active scheme
+    is atom-one-dark but its XML cannot be read (e.g. no GtkSource).
+    """
+    try:
+        scheme_id = current_scheme_id()
+    except Exception:
+        return None
+    if not scheme_id:
+        return None
+    if scheme_id == ATOM_SCHEME_ID and GtkSource is None:
+        return atom_one_dark_theme()
+    try:
+        colors = extract_scheme_colors(scheme_id)
+    except Exception as e:
+        _debug(f"scheme color extraction failed: {e!r}")
+        colors = None
+    if not colors:
+        if scheme_id == ATOM_SCHEME_ID:
+            return atom_one_dark_theme()
+        return None
+    return build_vte_theme(colors)
+
+
+def apply_theme_to_terminal(term, theme: dict | None) -> bool:
+    """Apply a VTE theme dict to a Vte.Terminal. Soft-only, never raises."""
+    if Gdk is None or term is None or not theme:
+        return False
+    try:
+        palette_hex = theme.get("palette") or []
+        if len(palette_hex) != 16:
+            return False
+
+        def _parse(value):
+            rgba = Gdk.RGBA()
+            if not rgba.parse(str(value)):
+                raise ValueError(f"unparsable color: {value!r}")
+            return rgba
+
+        term.set_colors(_parse(theme["fg"]), _parse(theme["bg"]),
+                        [_parse(entry) for entry in palette_hex])
+    except Exception as e:
+        _debug(f"terminal palette apply failed: {e!r}")
+        return False
+    for key, method in (("cursor", "set_color_cursor"),
+                        ("highlight", "set_color_highlight")):
+        try:
+            rgba = Gdk.RGBA()
+            if rgba.parse(str(theme[key])):
+                getattr(term, method)(rgba)
+        except Exception as e:
+            _debug(f"terminal {key} apply failed: {e!r}")
+    return True
 
 
 if Gtk is not None:
@@ -279,6 +561,10 @@ if Gtk is not None:
                 term.set_font(Pango.FontDescription("Monospace 10"))
             except Exception:
                 pass
+            try:
+                self.apply_theme_to_term(term)
+            except Exception as e:
+                _debug(f"terminal theme failed: {e!r}")
             try:
                 term.connect("child-exited", self._on_child_exited)
             except Exception:
@@ -459,6 +745,40 @@ if Gtk is not None:
             except Exception as e:
                 _debug(f"grab focus failed: {e!r}")
 
+        # -- editor-following theme -----------------------------------
+        def apply_theme_to_term(self, term) -> bool:
+            """Tint one terminal with xed's current scheme. Never raises."""
+            try:
+                theme = current_editor_theme()
+            except Exception as e:
+                _debug(f"editor theme lookup failed: {e!r}")
+                return False
+            if theme is None:
+                return False
+            return apply_theme_to_terminal(term, theme)
+
+        def apply_editor_theme(self) -> None:
+            """Re-tint every open terminal (called on scheme switches)."""
+            if self.notebook is None:
+                return
+            try:
+                theme = current_editor_theme()
+            except Exception as e:
+                _debug(f"editor theme lookup failed: {e!r}")
+                return
+            if theme is None:
+                return
+            try:
+                pages = self.notebook.get_n_pages()
+            except Exception:
+                return
+            for page in range(pages):
+                try:
+                    term = self.notebook.get_nth_page(page)
+                except Exception:
+                    continue
+                apply_theme_to_terminal(term, theme)
+
 
 class TabbedTerminalPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[misc]
     __gtype_name__ = "XedTabbedTerminalPlugin"
@@ -469,6 +789,8 @@ class TabbedTerminalPlugin(GObject.Object, Xed.WindowActivatable):  # type: igno
         super().__init__()
         self.panel = None
         self._window_key_id = None
+        self._scheme_settings = None
+        self._scheme_changed_id = None
 
     def do_activate(self) -> None:
         if Gtk is None:
@@ -511,6 +833,26 @@ class TabbedTerminalPlugin(GObject.Object, Xed.WindowActivatable):  # type: igno
         except Exception as e:
             _debug(f"window keys connect failed: {e!r}")
             self._window_key_id = None
+        # Live "follow the editor": re-tint open terminals on scheme switches.
+        try:
+            if Gio is not None:
+                settings = Gio.Settings.new(SCHEME_SETTINGS_SCHEMA)
+                self._scheme_settings = settings
+                self._scheme_changed_id = settings.connect(
+                    f"changed::{SCHEME_SETTINGS_KEY}",
+                    lambda *args: self._apply_editor_theme(),
+                )
+        except Exception as e:
+            _debug(f"scheme watch failed: {e!r}")
+            self._scheme_settings = None
+            self._scheme_changed_id = None
+
+    def _apply_editor_theme(self) -> None:
+        if self.panel is not None:
+            try:
+                self.panel.apply_editor_theme()
+            except Exception as e:
+                _debug(f"scheme re-tint failed: {e!r}")
 
     def do_deactivate(self) -> None:
         if self._window_key_id is not None:
@@ -519,6 +861,13 @@ class TabbedTerminalPlugin(GObject.Object, Xed.WindowActivatable):  # type: igno
             except Exception:
                 pass
         self._window_key_id = None
+        if self._scheme_changed_id is not None:
+            try:
+                self._scheme_settings.disconnect(self._scheme_changed_id)
+            except Exception:
+                pass
+        self._scheme_changed_id = None
+        self._scheme_settings = None
         if self.panel is not None:
             bottom = self._safe(lambda: self.window.get_bottom_panel())
             if bottom is not None:
