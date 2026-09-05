@@ -1,11 +1,11 @@
-"""Unit tests for dotnet CLI helpers, testing helpers, debugging helpers."""
+"""Unit tests for dotnet CLI helpers and testing helpers."""
 
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "xedcsharp"))
 
-from xedcsharp import dotnet_cli, testing, debugging, intelligence
+from xedcsharp import dotnet_cli, testing, intelligence
 
 
 def test_resolve_dotnet_found():
@@ -59,9 +59,3 @@ def test_normalize_diagnostics():
     assert (diags[0].line, diags[0].character) == (4, 6)
     assert diags[0].message == "Cannot convert"
     assert intelligence.summarize(diags) == "1 errors, 0 warnings"
-
-
-def test_debug_argv_shape():
-    argv = debugging.debug_argv("netcoredbg", "dotnet", "/tmp/App.dll", "--foo")
-    assert argv[:4] == ["netcoredbg", "--interpreter=vscode", "--", "dotnet"]
-    assert "/tmp/App.dll" in argv

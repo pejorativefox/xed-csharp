@@ -24,7 +24,6 @@ class SolutionExplorer(Gtk.Box):
         "build-project": (GObject.SignalFlags.RUN_LAST, None, (GObject.TYPE_STRING,)),
         "run-project": (GObject.SignalFlags.RUN_LAST, None, (GObject.TYPE_STRING,)),
         "test-project": (GObject.SignalFlags.RUN_LAST, None, (GObject.TYPE_STRING,)),
-        "debug-project": (GObject.SignalFlags.RUN_LAST, None, (GObject.TYPE_STRING,)),
         "restore": (GObject.SignalFlags.RUN_LAST, None, ()),
         "refresh": (GObject.SignalFlags.RUN_LAST, None, ()),
     }
@@ -207,7 +206,6 @@ class SolutionExplorer(Gtk.Box):
                 ("Build project", "build-project"),
                 ("Run project", "run-project"),
                 ("Test project", "test-project"),
-                ("Debug project", "debug-project"),
             ):
                 item = Gtk.MenuItem.new_with_label(label)
                 item.connect("activate", lambda _i, s=signal, p=fpath: self.emit(s, p))

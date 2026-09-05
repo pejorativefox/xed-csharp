@@ -2,9 +2,9 @@
 """C# DevKit-like plugin for xed (Linux Mint).
 
 Single multi-feature plugin: solution explorer + test explorer (side panel),
-build output + problems + debugger (bottom panel), Roslyn LSP intelligence
+build output + problems (bottom panel), Roslyn LSP intelligence
 (completion, hover, go-to-definition, references, format, code actions,
-diagnostics in-editor), test runner, netcoredbg DAP debugging.
+diagnostics in-editor) and test runner.
 """
 
 from __future__ import annotations
@@ -103,13 +103,9 @@ try:
     from . import roslyn as roslyn_mod
     from . import intelligence as intel
     from . import testing as testing_mod
-    from . import debugging as debugging_mod
-    from . import dap as dap_mod
-    from . import breakpoints as breakpoints_mod
     from .explorer import SolutionExplorer
     from .output import OutputView
     from .testpanel import TestPanel
-    from .debugpanel import DebugPanel
     from .completion import COMMIT_CHARS, CompletionPopup, NAV_KEYS
     from . import gscompletion as gs_mod
     from .views import (
@@ -200,7 +196,7 @@ except Exception:  # headless unit tests / missing typelib outside xed
     Gtk = Gio = Gdk = Pango = None  # type: ignore[no-redef]
     GtkSource = None  # type: ignore[no-redef]
     SolutionExplorer = OutputView = TestPanel = None  # type: ignore[no-redef]
-    DebugPanel = CompletionPopup = ViewTracker = None  # type: ignore[no-redef]
+    CompletionPopup = ViewTracker = None  # type: ignore[no-redef]
     NAV_KEYS = frozenset()  # type: ignore[no-redef]
     COMMIT_CHARS = frozenset({".", "(", "["})  # type: ignore[no-redef]
     SettingsStore = None  # type: ignore[no-redef]
@@ -212,9 +208,6 @@ except Exception:  # headless unit tests / missing typelib outside xed
     from . import roslyn as roslyn_mod  # noqa: E402
     from . import intelligence as intel  # noqa: E402
     from . import testing as testing_mod  # noqa: E402
-    from . import debugging as debugging_mod  # noqa: E402
-    from . import dap as dap_mod  # noqa: E402
-    from . import breakpoints as breakpoints_mod  # noqa: E402
     from . import gscompletion as gs_mod  # noqa: E402
     from . import deps as deps_mod  # noqa: E402
     from .logging_util import debug, error  # noqa: E402
@@ -232,8 +225,6 @@ def _note(*args, **kwargs) -> None:
 
 DIAG_TAG_NAMES = {1: "xedcsharp-diag-error", 2: "xedcsharp-diag-warning", 3: "xedcsharp-diag-info"}
 DIAG_MARK_CATEGORY = "xedcsharp-diagnostic"
-BP_MARK_CATEGORY = "xedcsharp-breakpoint"
-FRAME_MARK_CATEGORY = "xedcsharp-frame"
 
 
 def _gio_file_path(location) -> str | None:
@@ -251,7 +242,6 @@ PANEL_ICONS = {
     "solution": ("application-x-executable", "folder", "package-x-generic"),
     "tests": ("applications-science", "system-run", "dialog-information"),
     "output": ("utilities-terminal", "text-x-generic", "dialog-information"),
-    "debug": ("media-playback-start", "system-run", "dialog-information"),
 }
 
 
@@ -312,7 +302,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         self.explorer: SolutionExplorer | None = None
         self.testpanel: TestPanel | None = None
         self.output: OutputView | None = None
-        self.debugpanel: DebugPanel | None = None
         self.tracker: ViewTracker | None = None
         self.completion_popup: CompletionPopup | None = None
         self._gs_provider = None
@@ -323,11 +312,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             on_error=self._on_roslyn_error,
             on_ready=self._on_roslyn_ready,
         )
-        self.dap = dap_mod.DapSession(
-            on_event=self._on_dap_event,
-            ui_dispatch=lambda fn: GLib.idle_add(fn),
-        )
-        self.breakpoints = breakpoints_mod.BreakpointStore()
         self.diagnostics: dict[str, list[intel.Diagnostic]] = {}
         self._model: solution_mod.SolutionModel | None = None
         self._signal_ids: list[tuple[object, int]] = []
@@ -336,8 +320,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         self._pending_completion: dict | None = None
         self._completion_forward: tuple | None = None
         self._mark_views_configured: set[int] = set()
-        self._dap_thread: int | None = None
-        self._dap_project: str | None = None
         self._discovering_tests = False
         self._completion_warned = ""
 
@@ -348,7 +330,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         self.explorer = SolutionExplorer()
         self.testpanel = TestPanel()
         self.output = OutputView()
-        self.debugpanel = DebugPanel()
         self.tracker = ViewTracker()
         self.completion_popup = CompletionPopup()
 
@@ -362,8 +343,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         if bottom is not None:
             if self.output is not None and not _add_to_panel(bottom, self.output, "C# Output", "output"):
                 debug("bottom panel (output) add failed")
-            if self.debugpanel is not None and not _add_to_panel(bottom, self.debugpanel, "C# Debug", "debug"):
-                debug("bottom panel (debug) add failed")
         self._report_startup_deps()
 
         if self.explorer is not None:
@@ -372,7 +351,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             self._connect(self.explorer, "build-project", lambda _w, p: self._build_project(p))
             self._connect(self.explorer, "run-project", lambda _w, p: self._run_project(p))
             self._connect(self.explorer, "test-project", lambda _w, p: self._run_test_project(p))
-            self._connect(self.explorer, "debug-project", lambda _w, p: self._debug_project(p))
             self._connect(self.explorer, "restore", lambda _w: self._restore())
             self._connect(self.explorer, "refresh", lambda _w: self._schedule_refresh())
         if self.testpanel is not None:
@@ -381,15 +359,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             self._connect(self.testpanel, "refresh-tests", lambda _w: self._refresh_tests())
         if self.output is not None:
             self._connect(self.output, "jump-to", lambda _w, p, l, c: self._jump_to(p, l, c))
-        if self.debugpanel is not None:
-            self._connect(self.debugpanel, "debug-launch", lambda _w: self._debug_project(None))
-            self._connect(self.debugpanel, "debug-stop", lambda _w: self._debug_stop())
-            self._connect(self.debugpanel, "debug-continue", lambda _w: self._dap_simple("continue"))
-            self._connect(self.debugpanel, "debug-step-over", lambda _w: self._dap_step("next"))
-            self._connect(self.debugpanel, "debug-step-into", lambda _w: self._dap_step("stepIn"))
-            self._connect(self.debugpanel, "debug-step-out", lambda _w: self._dap_step("stepOut"))
-            self._connect(self.debugpanel, "breakpoints-clear", lambda _w: self._breakpoints_clear())
-            self._connect(self.debugpanel, "jump-to", lambda _w, p, l, c: self._jump_to(p, l, c))
         if self.tracker is not None:
             self._connect(self.tracker, "doc-changed", lambda _w, p: self._sync_doc(p))
             self._connect(self.tracker, "doc-saved", lambda _w, p: self._on_doc_saved(p))
@@ -400,8 +369,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             self._connect(self.tracker, "hover-request", self._on_hover_request)
             self._connect(self.tracker, "format-request", lambda _w, p: self._format_doc_path(p))
             self._connect(self.tracker, "code-action-request", self._on_code_action_request)
-            self._connect(self.tracker, "toggle-breakpoint", lambda _w, p, l: self._toggle_breakpoint(p, l))
-            self._connect(self.tracker, "launch-debug", lambda _w: self._debug_project(None))
             try:
                 self.tracker.attach(self.window)
             except Exception as e:
@@ -413,8 +380,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
 
         self._connect(self.window, "active-tab-changed", lambda *_a: self._schedule_refresh())
         self._connect(self.window, "tab-added", lambda *_a: self._schedule_refresh())
-        if self.debugpanel is not None:
-            self.debugpanel.set_breakpoints(self.breakpoints.all())
         self._schedule_refresh()
 
     def do_deactivate(self) -> None:
@@ -448,15 +413,10 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             self.roslyn.stop()
         except Exception:
             pass
-        try:
-            self.dap.close()
-        except Exception:
-            pass
         for widget_name, accessor in (
             ("explorer", lambda: self.window.get_side_panel()),
             ("testpanel", lambda: self.window.get_side_panel()),
             ("output", lambda: self.window.get_bottom_panel()),
-            ("debugpanel", lambda: self.window.get_bottom_panel()),
         ):
             widget = getattr(self, widget_name, None)
             if widget is None:
@@ -490,14 +450,9 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
                 roslyn_server = str(settings.get("roslyn_server")) if settings else "~/.dotnet/tools/roslyn-language-server"
             except Exception:
                 roslyn_server = "~/.dotnet/tools/roslyn-language-server"
-            try:
-                netcoredbg_path = str(settings.get("netcoredbg_path")) if settings else "netcoredbg"
-            except Exception:
-                netcoredbg_path = "netcoredbg"
             issues = deps_mod.check_all(
                 dotnet=dotnet or "dotnet",
                 roslyn_server=roslyn_server,
-                netcoredbg_path=netcoredbg_path,
             )
         except Exception as e:
             try:
@@ -932,8 +887,6 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
                 view.set_show_line_marks(True)
                 for category, color in (
                     (DIAG_MARK_CATEGORY, "#e01b24"),
-                    (BP_MARK_CATEGORY, "#a51d2d"),
-                    (FRAME_MARK_CATEGORY, "#1c71d8"),
                 ):
                     try:
                         attrs = GtkSource.MarkAttributes()
@@ -1832,314 +1785,3 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             dotnet_cli.run_streaming(argv, root, on_line, on_done)
 
         _chain(0)
-
-    # -- breakpoints -------------------------------------------------
-    def _toggle_breakpoint(self, path: str, line0: int) -> None:
-        present = self.breakpoints.toggle(path, line0 + 1)
-        debug(f"breakpoint {path}:{line0 + 1} -> {present}")
-        doc = self._find_doc(path)
-        if doc is not None:
-            self._render_breakpoints(doc)
-        if self.debugpanel is not None:
-            self.debugpanel.set_breakpoints(self.breakpoints.all())
-            self.debugpanel.set_status(
-                f"Breakpoint {'set' if present else 'cleared'} at {os.path.basename(path)}:{line0 + 1}"
-            )
-
-    def _breakpoints_clear(self) -> None:
-        self.breakpoints.clear_all()
-        for _path, doc in self._iter_csharp_docs():
-            self._clear_marks(doc, BP_MARK_CATEGORY)
-        if self.debugpanel is not None:
-            self.debugpanel.set_breakpoints({})
-
-    def _clear_marks(self, doc, category: str) -> None:
-        try:
-            start, end = doc.get_bounds()
-            doc.remove_source_marks(start, end, category)
-        except Exception:
-            pass
-
-    def _render_breakpoints(self, doc) -> None:
-        path = doc_path(doc)
-        if not path:
-            return
-        self._clear_marks(doc, BP_MARK_CATEGORY)
-        for line1 in self.breakpoints.get(path):
-            try:
-                it = doc.get_iter_at_line(max(0, line1 - 1))
-                doc.create_source_mark(None, BP_MARK_CATEGORY, it)
-            except Exception:
-                continue
-        self._configure_marks(doc)
-
-    # -- debugging ---------------------------------------------------
-    def _pick_startup_project(self, preferred: str | None = None):
-        if preferred:
-            for p in (self._model.projects if self._model else []):
-                if p.path == preferred:
-                    return p
-        projects = list(self._model.projects) if self._model else []
-        if not projects:
-            return None
-        active = self._active_path()
-        if active:
-            for p in projects:
-                try:
-                    if os.path.commonpath([active, os.path.dirname(p.path)]) == os.path.dirname(p.path):
-                        if p.output_type.lower() == "exe":
-                            return p
-                except ValueError:
-                    continue
-            for p in projects:
-                try:
-                    if os.path.commonpath([active, os.path.dirname(p.path)]) == os.path.dirname(p.path):
-                        return p
-                except ValueError:
-                    continue
-        for p in projects:
-            if p.output_type.lower() == "exe":
-                return p
-        return projects[0]
-
-    def _debug_project(self, project: str | None) -> None:
-        if self.debugpanel is None or self.output is None:
-            return
-        if getattr(self.dap, "state", "") not in ("stopped", "error"):
-            self.debugpanel.set_status("A debug session is already running (Stop first).")
-            return
-        target = self._pick_startup_project(project)
-        if target is None:
-            self.output.append("No project to debug.\n")
-            return
-        dotnet = self._dotnet()
-        tfm = (target.target_frameworks or [""])[0]
-        self.debugpanel.set_status(f"Building {target.name}…")
-        self.output.append(f"\n$ {dotnet} build {target.path} (for debugging)\n")
-
-        def _worker() -> None:
-            if not debugging_mod.ensure_built(dotnet, target.path):
-                GLib.idle_add(lambda: self._debug_build_failed(target.path))
-                return
-            dll = debugging_mod.build_dll_path(target.path, "Debug", tfm)
-            GLib.idle_add(lambda: self._debug_launch(target, dll))
-
-        threading.Thread(target=_worker, name="xedcsharp-debug-build", daemon=True).start()
-
-    def _debug_build_failed(self, project: str) -> bool:
-        if self.debugpanel is not None:
-            self.debugpanel.set_status(f"Build failed for {os.path.basename(project)} — not debugging.")
-        if self.output is not None:
-            self.output.append("Build failed; debug session aborted.\n")
-        return False
-
-    def _debug_launch(self, target, dll: str) -> bool:
-        assert self.debugpanel is not None and self.output is not None
-        if not dll or not os.path.isfile(dll):
-            self.debugpanel.set_status(f"Built DLL not found ({dll or '?'}). Build the Debug configuration first.")
-            self.output.append(f"Debug DLL not found: {dll}\n")
-            return False
-        configured = str(self.settings.get("netcoredbg_path") or "netcoredbg")
-        netcoredbg = debugging_mod.find_netcoredbg(configured)
-        if netcoredbg is None:
-            self.debugpanel.set_status("netcoredbg not found.")
-            self.output.append(debugging_mod.INSTALL_HINT + "\n")
-            return False
-        if not self.dap.connect([netcoredbg, "--interpreter=vscode"]):
-            self.debugpanel.set_status("Could not start netcoredbg.")
-            return False
-        self._dap_project = target.path
-        self._dap_thread = None
-        self.debugpanel.set_status(f"Debugging {target.name}…")
-        self.output.append(f"$ {netcoredbg} --interpreter=vscode -- {self._dotnet()} {dll}\n")
-        cwd = os.path.dirname(target.path)
-        args = str(self.settings.get("debug_args") or "")
-        stop_at_entry = bool(self.settings.get("stop_at_entry"))
-        self.dap.send_request("initialize", dap_mod.initialize_args(), self._on_dap_initialized)
-        self._pending_launch = (dll, cwd, args, stop_at_entry)
-        return False
-
-    def _on_dap_initialized(self, message: dict) -> None:
-        if not (message or {}).get("success", False):
-            if self.debugpanel is not None:
-                self.debugpanel.set_status("Debugger initialize failed.")
-            try:
-                self.dap.close()
-            except Exception:
-                pass
-            return
-        pending = getattr(self, "_pending_launch", None)
-        if not pending:
-            return
-        dll, cwd, args, stop_at_entry = pending
-        self.dap.send_request(
-            "launch", dap_mod.launch_args(dll, cwd, args, stop_at_entry), self._on_dap_launched
-        )
-
-    def _on_dap_launched(self, message: dict) -> None:
-        if not (message or {}).get("success", False):
-            err = ((message or {}).get("message") or "launch failed")
-            if self.debugpanel is not None:
-                self.debugpanel.set_status(f"Launch failed: {err}")
-            if self.output is not None:
-                self.output.append(f"Launch failed: {err}\n")
-            try:
-                self.dap.close()
-            except Exception:
-                pass
-
-    def _on_dap_event(self, event: str, body: dict) -> None:
-        if self.debugpanel is None:
-            return
-        if event == "initialized":
-            for path, lines in self.breakpoints.all().items():
-                self.dap.send_request("setBreakpoints", dap_mod.set_breakpoints_args(path, lines), None)
-            self.dap.send_request("configurationDone", {}, None)
-            self.debugpanel.set_status("Running…")
-        elif event == "stopped":
-            self.debugpanel.set_status(dap_mod.summarize_stopped(body))
-            try:
-                self._dap_thread = int(body.get("threadId", 0)) or None
-            except (TypeError, ValueError):
-                self._dap_thread = None
-            self._dap_fetch_stack()
-        elif event == "continued":
-            self._dap_thread = None
-            self.debugpanel.clear_runtime()
-            self.debugpanel.set_status("Running…")
-            self._clear_frame_marks()
-        elif event in ("terminated", "exited"):
-            self.debugpanel.set_status(f"Debug session {event}.")
-            if self.output is not None:
-                self.output.append(f"\n(debug session {event})\n")
-            try:
-                self.dap.close()
-            except Exception:
-                pass
-            self._dap_thread = None
-            self.debugpanel.clear_runtime()
-            self._clear_frame_marks()
-        elif event == "output":
-            text = body.get("output", "")
-            if text and self.output is not None:
-                self.output.append(text if text.endswith("\n") else text + "\n")
-
-    def _dap_fetch_stack(self) -> None:
-        if self._dap_thread is None:
-            self.dap.send_request("threads", {}, self._on_dap_threads_for_stack)
-        else:
-            self.dap.send_request(
-                "stackTrace",
-                {"threadId": self._dap_thread, "startFrame": 0, "levels": 20},
-                self._on_dap_stack,
-            )
-
-    def _on_dap_threads_for_stack(self, message: dict) -> None:
-        threads = dap_mod.parse_threads((message or {}).get("body") or {})
-        if not threads:
-            return
-        try:
-            self._dap_thread = int(threads[0].get("id", 0)) or None
-        except (TypeError, ValueError):
-            self._dap_thread = None
-        if self._dap_thread is not None:
-            self._dap_fetch_stack()
-
-    def _on_dap_stack(self, message: dict) -> None:
-        frames = dap_mod.parse_stack_frames((message or {}).get("body") or {})
-        if self.debugpanel is not None:
-            self.debugpanel.set_stack(frames)
-        if frames:
-            top = frames[0]
-            source = top.get("source") or {}
-            fpath = source.get("path", "")
-            line1 = int(top.get("line", 0) or 0)
-            if fpath and os.path.isfile(fpath):
-                self._jump_to(fpath, max(0, line1 - 1), 0)
-                self._mark_frame(fpath, max(0, line1 - 1))
-            try:
-                frame_id = int(top.get("id", 0))
-            except (TypeError, ValueError):
-                frame_id = 0
-            self.dap.send_request("scopes", {"frameId": frame_id}, self._on_dap_scopes)
-        else:
-            if self.debugpanel is not None:
-                self.debugpanel.set_variables([])
-
-    def _on_dap_scopes(self, message: dict) -> None:
-        scopes = dap_mod.parse_scopes((message or {}).get("body") or {})
-        if not scopes:
-            if self.debugpanel is not None:
-                self.debugpanel.set_variables([])
-            return
-        pending = {"count": len(scopes), "groups": []}
-
-        def _make_cb(scope_name: str):
-            def _cb(response: dict) -> None:
-                variables = dap_mod.parse_variables((response or {}).get("body") or {})
-                pending["groups"].append((scope_name, [dap_mod.format_variable(v) for v in variables]))
-                pending["count"] -= 1
-                if pending["count"] <= 0 and self.debugpanel is not None:
-                    ordered = sorted(pending["groups"], key=lambda g: g[0])
-                    self.debugpanel.set_variables(ordered)
-
-            return _cb
-
-        for scope in scopes:
-            try:
-                ref = int(scope.get("variablesReference", 0))
-            except (TypeError, ValueError):
-                ref = 0
-            name = str(scope.get("name", "Scope"))
-            if ref > 0:
-                self.dap.send_request("variables", {"variablesReference": ref}, _make_cb(name))
-            else:
-                pending["count"] -= 1
-        if pending["count"] <= 0 and self.debugpanel is not None:
-            self.debugpanel.set_variables(sorted(pending["groups"], key=lambda g: g[0]))
-
-    def _mark_frame(self, path: str, line0: int) -> None:
-        doc = self._find_doc(path)
-        if doc is None:
-            return
-        self._clear_frame_marks()
-        try:
-            it = doc.get_iter_at_line(max(0, line0))
-            doc.create_source_mark(None, FRAME_MARK_CATEGORY, it)
-        except Exception:
-            pass
-        self._configure_marks(doc)
-
-    def _clear_frame_marks(self) -> None:
-        for _path, doc in self._iter_csharp_docs():
-            self._clear_marks(doc, FRAME_MARK_CATEGORY)
-
-    def _dap_simple(self, command: str) -> None:
-        if getattr(self.dap, "state", "") in ("stopped", "error", "connecting"):
-            if self.debugpanel is not None:
-                self.debugpanel.set_status("No active debug session.")
-            return
-        args: dict = {}
-        if command in ("continue", "next", "stepIn", "stepOut"):
-            if self._dap_thread is None:
-                if self.debugpanel is not None:
-                    self.debugpanel.set_status("No stopped thread yet.")
-                return
-            args = {"threadId": self._dap_thread}
-        self.dap.send_request(command, args, None)
-        if self.debugpanel is not None and command == "continue":
-            self.debugpanel.set_status("Running…")
-
-    def _dap_step(self, command: str) -> None:
-        self._dap_simple(command)
-
-    def _debug_stop(self) -> None:
-        try:
-            self.dap.close()
-        except Exception:
-            pass
-        self._dap_thread = None
-        if self.debugpanel is not None:
-            self.debugpanel.set_status("Not debugging.")
-            self.debugpanel.clear_runtime()
-        self._clear_frame_marks()

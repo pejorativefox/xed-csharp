@@ -68,9 +68,7 @@ def check_gi_namespaces(require_version=None) -> list[DependencyIssue]:
     return issues
 
 
-def check_toolchain(dotnet="dotnet", roslyn_server="~/.dotnet/tools/roslyn-language-server",
-                    netcoredbg_path="netcoredbg") -> list[DependencyIssue]:
-    from . import debugging as debugging_mod
+def check_toolchain(dotnet="dotnet", roslyn_server="~/.dotnet/tools/roslyn-language-server") -> list[DependencyIssue]:
     from . import dotnet_cli
     from . import roslyn as roslyn_mod
     issues: list[DependencyIssue] = []
@@ -94,24 +92,13 @@ def check_toolchain(dotnet="dotnet", roslyn_server="~/.dotnet/tools/roslyn-langu
             detail=f"configured {roslyn_server!r} not found",
             hint="dotnet tool install --global roslyn-language-server",
         ))
-    try:
-        found = debugging_mod.find_netcoredbg(netcoredbg_path or "netcoredbg")
-    except Exception:
-        found = None
-    if not found:
-        issues.append(DependencyIssue(
-            name="netcoredbg",
-            detail="debugging degrades to an install hint without it",
-            hint="https://github.com/Samsung/netcoredbg/releases",
-            warn_only=True,
-        ))
     return issues
 
 
 def check_all(dotnet="dotnet", roslyn_server="~/.dotnet/tools/roslyn-language-server",
-              netcoredbg_path="netcoredbg", include_gi=True) -> list[DependencyIssue]:
+              include_gi=True) -> list[DependencyIssue]:
     issues = check_python_modules()
     if include_gi and not any(i.name.startswith("python module") for i in issues):
         issues.extend(check_gi_namespaces())
-    issues.extend(check_toolchain(dotnet, roslyn_server, netcoredbg_path))
+    issues.extend(check_toolchain(dotnet, roslyn_server))
     return issues

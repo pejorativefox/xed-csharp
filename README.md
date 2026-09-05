@@ -2,7 +2,7 @@
 
 A set of plugins that gives Linux Mint's xed editor some modern comforts:
 a project file browser with git colors, quick file opening, C# support
-with completions and debugging, git change markers in the editor gutter,
+with completions, git change markers in the editor gutter,
 a built-in terminal, and handy shortcuts for hiding panes.
 
 You don't need to know any programming to use these — install, enable,
@@ -31,9 +31,8 @@ and edit.
 **C# support** (C# DevKit for xed)
 - Solution explorer, build / run / test per project, a test list with
   pass/fail marks, clickable error list, code completions, hover help,
-  go-to-definition (`F12`), find references (`Shift+F12`), formatting
-  (`Shift+Alt+F`), quick fixes (`Alt+Enter`), and debugging with
-  breakpoints (`F9`) and launch (`F5`).
+   go-to-definition (`F12`), find references (`Shift+F12`), formatting
+   (`Shift+Alt+F`) and quick fixes (`Alt+Enter`).
 
 **Built-in terminal** (tabbed-terminal)
 - A terminal in xed's bottom panel, with tabs.
@@ -83,8 +82,6 @@ panel-hider, tabbed-terminal, git-inline-diff.
 | `F12` / `Shift+F12` | Go to definition / find references (C#) |
 | `Alt+Enter` | Quick fix for the error at the cursor (C#) |
 | `Shift+Alt+F` | Format the file (C#) |
-| `F9` | Toggle breakpoint (C#) |
-| `F5` | Build and debug (C#) |
 
 ## Something not working?
 

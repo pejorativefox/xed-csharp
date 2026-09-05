@@ -5,7 +5,7 @@ Covers every failure mode seen in the wild so far:
 - plugin files missing / stale __pycache__
 - Xed typelib + libxed.so on private (non-standard) paths
 - missing libpeas python3 loader
-- missing dotnet / roslyn-language-server / netcoredbg
+- missing dotnet / roslyn-language-server
 - plugin not enabled in dconf
 - stale xed process swallowing XED_PLUGIN_DEBUG (GApplication remote)
 
@@ -105,12 +105,6 @@ def main() -> int:
         shutil.which("roslyn-language-server") is not None
         or os.path.isfile(os.path.expanduser("~/.dotnet/tools/roslyn-language-server")),
         "dotnet tool install --global roslyn-language-server",
-    )
-    check(
-        "netcoredbg (optional, debugging only)",
-        shutil.which("netcoredbg") is not None,
-        "https://github.com/Samsung/netcoredbg/releases",
-        warn_only=True,
     )
 
     print("\n-- xed state --")

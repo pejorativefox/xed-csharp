@@ -113,12 +113,6 @@ class ViewTracker(GObject.Object):
             None,
             (GObject.TYPE_STRING, GObject.TYPE_INT, GObject.TYPE_INT),
         ),
-        "toggle-breakpoint": (
-            GObject.SignalFlags.RUN_LAST,
-            None,
-            (GObject.TYPE_STRING, GObject.TYPE_INT),
-        ),
-        "launch-debug": (GObject.SignalFlags.RUN_LAST, None, ()),
     }
 
     def __init__(self) -> None:
@@ -300,7 +294,7 @@ class ViewTracker(GObject.Object):
         path = doc_path(doc)
         if not path:
             return False
-        if ctrl or keyname in ("F12", "F9", "F5") or keyname.lower() == "space":
+        if ctrl or keyname == "F12" or keyname.lower() == "space":
             debug(f"key: name={keyname} ctrl={ctrl} shift={shift} alt={alt} "
                   f"path={path} framework={self.framework_completion}")
         line, char = self._cursor_lsp(doc)
@@ -321,12 +315,6 @@ class ViewTracker(GObject.Object):
                 debug(f"completion invoke passthrough path={path} (native binding)")
                 return False
             self.emit("completion-request", path, line, char, "invoke")
-            return True
-        if keyname == "F9" and plain and not shift:
-            self.emit("toggle-breakpoint", path, cursor_line0(doc))
-            return True
-        if keyname == "F5" and plain and not shift:
-            self.emit("launch-debug")
             return True
         if alt and not ctrl and keyname.lower() in ("return", "enter", "kp_enter"):
             self.emit("code-action-request", path, line, char)

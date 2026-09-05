@@ -20,9 +20,6 @@ DEFAULTS = {
     "auto_restore": True,
     "format_on_save": False,
     "test_framework_filter": "",
-    "netcoredbg_path": "netcoredbg",
-    "debug_args": "",
-    "stop_at_entry": False,
 }
 
 

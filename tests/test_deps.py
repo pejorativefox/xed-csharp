@@ -23,18 +23,10 @@ def test_toolchain_all_missing():
     issues = deps.check_toolchain(
         dotnet="definitely-not-dotnet-xyz",
         roslyn_server="definitely-not-roslyn-xyz",
-        netcoredbg_path="definitely-not-netcoredbg-xyz",
     )
     names = [i.name for i in issues]
     assert any("dotnet" in n for n in names)
     assert any("roslyn" in n for n in names)
-    net = [i for i in issues if i.name == "netcoredbg"]
-    assert net and net[0].warn_only
-
-
-def test_toolchain_netcoredbg_optional():
-    issues = deps.check_toolchain(netcoredbg_path="definitely-not-netcoredbg-xyz")
-    assert any(i.warn_only for i in issues)
 
 
 def test_error_logs_without_debug_env():
