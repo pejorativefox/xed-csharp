@@ -316,13 +316,46 @@ def test_start_iter_and_activate_on_real_buffer():
     buf = GtkSource.Buffer()
     buf.set_text("Console.Wri")
     end = buf.get_end_iter()
-    start = end.copy()
-    assert provider.do_get_start_iter(None, None, start) is True
+
+    class FakeCtx:
+        def get_iter(self):
+            return (True, end)
+
+    ok, start = provider.do_get_start_iter(FakeCtx(), None)
+    assert ok is True
     assert start.get_offset() == 8
     assert buf.get_text(start, end, True) == "Wri"
-    proposal = gs_mod.RoslynProposal(label="WriteLine", insert_text="WriteLine")
+    proposal = gs_mod.RoslynProposal(label="WriteLine", insert_text="WriteLine",
+                                     replace_start=8, replace_end=11)
+    ok, start = provider.do_get_start_iter(FakeCtx(), proposal)
+    assert ok is True
+    assert start.get_offset() == 8
     assert provider.do_activate_proposal(proposal, buf.get_end_iter()) is True
     assert buf.get_text(*buf.get_bounds(), True) == "Console.WriteLine"
+
+
+def test_activate_appends_suffix_by_kind():
+    if _GUI is None:
+        return
+    Gtk, GtkSource = _GUI
+    provider = _provider()
+    buf = GtkSource.Buffer()
+    buf.set_text("count")
+    method = gs_mod.RoslynProposal(label="WriteLine", insert_text="WriteLine", kind=2)
+    assert provider.do_activate_proposal(method, buf.get_end_iter()) is True
+    assert buf.get_text(*buf.get_bounds(), True) == "WriteLine()"
+    cursor = buf.get_iter_at_mark(buf.get_insert()).get_offset()
+    assert cursor == len("WriteLine("), cursor  # between the parens
+    buf.set_text("count")
+    var = gs_mod.RoslynProposal(label="count", insert_text="count", kind=6)
+    assert provider.do_activate_proposal(var, buf.get_end_iter()) is True
+    assert buf.get_text(*buf.get_bounds(), True) == "count."
+    # No doubling when the char is already there.
+    buf.set_text("WriteLine(")
+    again = gs_mod.RoslynProposal(label="WriteLine", insert_text="WriteLine", kind=2,
+                                  replace_start=0, replace_end=9)
+    assert provider.do_activate_proposal(again, buf.get_iter_at_offset(9)) is True
+    assert buf.get_text(*buf.get_bounds(), True) == "WriteLine("
 
 
 def test_match_gates_non_csharp():
@@ -374,5 +407,52 @@ def test_attach_detach_view():
         gs_mod.detach_from_views(fake_window, provider, attached)
         assert len(view.get_completion().get_providers()) == before
         assert attached == set()
+    finally:
+        win.destroy()
+
+
+def test_show_completion_uses_native_shape():
+    """Programmatic invoke must mirror GtkSourceView's show-completion handler.
+
+    Regression: starting with a caller-created context (explicit iter, single
+    provider) returns True but the framework never adopts the context, so
+    add_proposals hits "completion->priv->context == context" and the dialog
+    never appears. The native shape (NULL position, all providers) drives
+    match/populate on a framework-owned context.
+    """
+    if _GUI is None:
+        return
+    import time
+
+    Gtk, GtkSource = _GUI
+    win = Gtk.Window()
+    buf = GtkSource.Buffer()
+    buf.set_text("Console.Wri")
+    view = GtkSource.View.new_with_buffer(buf)
+    win.add(view)
+    win.show_all()
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+    try:
+        requests: list = []
+
+        def send_request(method, params, callback):
+            requests.append(method)
+            callback(dict(_ITEMS_MSG))
+            return 3
+
+        provider = gs_mod.RoslynCompletionProvider(
+            is_ready=lambda: True,
+            resolve_path=lambda _buf: "/tmp/A.cs",
+            send_request=send_request,
+        )
+        view.get_completion().add_provider(provider)
+        assert gs_mod.show_completion(view, provider) is True
+        deadline = time.time() + 5
+        while not requests and time.time() < deadline:
+            while Gtk.events_pending():
+                Gtk.main_iteration()
+            time.sleep(0.05)
+        assert requests == ["textDocument/completion"], requests
     finally:
         win.destroy()

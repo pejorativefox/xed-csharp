@@ -374,7 +374,68 @@ def parse_completion(
         items = [item for _, item in indexed]
     else:
         items = [item for _, item in indexed]
-    return items
+    return locals_first(items)
+
+
+#: LSP kinds treated as locals (variables, parameters, constants): these
+#: sort to the top of the list, stable, so `var |` offers locals first.
+LOCAL_KINDS = frozenset({6, 21})
+
+
+def locals_first(items: list["CompletionItem"]) -> list["CompletionItem"]:
+    """Stable-partition locals (Variable/Constant kinds) to the front."""
+    return [i for i in items if i.kind in LOCAL_KINDS] + [
+        i for i in items if i.kind not in LOCAL_KINDS
+    ]
+
+
+def _match_text(item: "CompletionItem") -> str:
+    return (item.filter_text or item.label or "").lower()
+
+
+#: LSP kinds that take `(` on accept (callables).
+PAREN_KINDS = frozenset({2, 3, 4})
+
+#: LSP kinds that take `.` on accept (values/namespaces worth chaining off).
+DOT_KINDS = frozenset({5, 6, 7, 8, 9, 10, 13, 22})
+
+
+def completion_suffix(kind: int, insert_text: str) -> str:
+    """Chained char to append after accepting a completion (`(`/`.`/`""`).
+
+    Skipped when the inserted text already carries its own terminator
+    (snippets like ``WriteLine($1)``, ``foo()``) so nothing duplicates.
+    """
+    try:
+        kind = int(kind)
+    except (TypeError, ValueError):
+        return ""
+    text = insert_text or ""
+    if not text or text.endswith(("(", ")", ".", ";", ",")):
+        return ""
+    if "(" in text or ")" in text:
+        return ""
+    if kind in PAREN_KINDS:
+        return "("
+    if kind in DOT_KINDS:
+        return "."
+    return ""
+
+
+def rank_for_prefix(items: list["CompletionItem"], prefix: str) -> list["CompletionItem"]:
+    """Cull non-matches and rank by typed prefix, locals first per tier.
+
+    Tiers (stable server order within each): locals starting with the
+    prefix, others starting with it, locals containing it, others
+    containing it. Empty prefix keeps everything, locals first.
+    """
+    if not prefix:
+        return locals_first(items)
+    lowered = prefix.lower()
+    starts = [i for i in items if _match_text(i).startswith(lowered)]
+    seen = {id(i) for i in starts}
+    contains = [i for i in items if id(i) not in seen and lowered in _match_text(i)]
+    return locals_first(starts) + locals_first(contains)
 
 
 def completion_filter_text(item: CompletionItem) -> str:

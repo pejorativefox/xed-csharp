@@ -65,19 +65,51 @@ def find_solution(start_path: str) -> Optional[str]:
         directory = parent
 
 
+#: Directories never descended into during project discovery. Besides
+#: speed, this matters for correctness: symlink farms (e.g. Wine
+#: ``dosdevices/z:`` -> ``/``) drag the Roslyn server into ``/proc`` where
+#: it aborts on dead PIDs (exit 134, ``No such process ... /proc/<pid>/cwd``).
+_PRUNE_DIRS = frozenset({
+    ".git", ".svn", ".hg", ".cache", ".dotnet", ".nuget",
+    "bin", "obj", "node_modules", ".vs", ".idea",
+    "dosdevices", "drive_c",
+})
+
+
+def is_home_root(path: str) -> bool:
+    """True when path is the user's home dir (or above it)."""
+    try:
+        real = os.path.realpath(os.path.abspath(path))
+        home = os.path.realpath(os.path.expanduser("~"))
+        return real == home or real == os.path.dirname(home) or real == "/"
+    except Exception:
+        return False
+
+
 def find_projects_fallback(root_dir: str) -> List[str]:
     """Glob fallback when `dotnet sln` is unavailable."""
+    if is_home_root(root_dir):
+        debug(f"find_projects_fallback: refusing to crawl {root_dir!r}")
+        return []
     found = []
-    for dirpath, _dirnames, filenames in os.walk(root_dir):
-        if "obj" in dirpath.split(os.sep) or "bin" in dirpath.split(os.sep):
+    for dirpath, dirnames, filenames in os.walk(root_dir, followlinks=False):
+        parts = dirpath.split(os.sep)
+        if "obj" in parts or "bin" in parts:
             continue
+        # Prune junk + symlinked dirs in place (os.walk honors this).
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in _PRUNE_DIRS
+            and not d.startswith(".")
+            and not os.path.islink(os.path.join(dirpath, d))
+        ]
         for filename in filenames:
             if filename.endswith(".csproj"):
                 found.append(os.path.join(dirpath, filename))
         # Don't descend too deep for the fallback; one repo = shallow.
         depth = os.path.relpath(dirpath, root_dir).count(os.sep)
         if depth > 4:
-            _dirnames[:] = []
+            dirnames[:] = []
     return sorted(found)
 
 
@@ -145,6 +177,16 @@ def load_solution(start_path: str, dotnet: str = "dotnet") -> SolutionModel:
             debug(f"`dotnet sln list` failed ({result.returncode}), glob fallback")
     if not projects:
         projects = find_projects_fallback(root)
+    if sln:
+        root = os.path.dirname(sln)
+    elif projects:
+        # Tighten the workspace to the projects found: handing the server
+        # a broad root (e.g. $HOME) makes it crawl symlink farms like Wine
+        # dosdevices/z: -> /proc, where it aborts (exit 134).
+        try:
+            root = os.path.commonpath([os.path.dirname(p) for p in projects])
+        except ValueError:
+            pass
     model = SolutionModel(path=sln, root_dir=root)
     for csproj in projects:
         if os.path.exists(csproj):

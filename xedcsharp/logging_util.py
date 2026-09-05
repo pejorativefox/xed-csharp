@@ -21,6 +21,15 @@ def debug(msg: str) -> None:
         sys.stderr.flush()
 
 
+def _append_marker(event: str) -> None:
+    try:
+        stamp = datetime.datetime.now().isoformat(timespec="seconds")
+        with open(f"/tmp/xedcsharp-{os.getuid()}.log", "a", encoding="utf-8") as f:
+            f.write(f"{stamp} pid={os.getpid()} {event}\n")
+    except Exception:
+        pass
+
+
 def marker(event: str) -> None:
     """Append a line to the debug marker file (only when debugging is on).
 
@@ -29,9 +38,13 @@ def marker(event: str) -> None:
     """
     if not _DEBUG:
         return
+    _append_marker(event)
+
+
+def error(msg: str) -> None:
     try:
-        stamp = datetime.datetime.now().isoformat(timespec="seconds")
-        with open(f"/tmp/xedcsharp-{os.getuid()}.log", "a", encoding="utf-8") as f:
-            f.write(f"{stamp} pid={os.getpid()} {event}\n")
+        sys.stderr.write(f"[xed-csharp] {msg}\n")
+        sys.stderr.flush()
     except Exception:
         pass
+    _append_marker(f"ERROR {msg}")

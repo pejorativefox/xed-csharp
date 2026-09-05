@@ -74,10 +74,12 @@ class RoslynManager:
         on_diagnostics: Optional[DiagnosticsCallback] = None,
         ui_dispatch: Optional[Callable[[Callable[[], None]], None]] = None,
         on_error: Optional[ErrorCallback] = None,
+        on_ready: Optional[Callable[[], None]] = None,
     ) -> None:
         self.on_diagnostics = on_diagnostics
         self.ui_dispatch = ui_dispatch or (lambda fn: fn())
         self.on_error = on_error
+        self.on_ready = on_ready
         self.transport: Optional[LspTransport] = None
         self.pending = PendingRequests()
         self._lock = threading.Lock()
@@ -158,6 +160,12 @@ class RoslynManager:
             self.state = "error"
             log_hint = f" Server log: {self.stderr_log_path}" if self.stderr_log_path else ""
             lines = [f"Roslyn language server exited (code {returncode}).{log_hint}"]
+            blob = "\n".join(head + tail)
+            if returncode in (134, 139) and "/proc/" in blob:
+                lines.append("This crash means the server crawled a symlink into /proc "
+                             "(e.g. a Wine dosdevices/z: -> / under the workspace root) "
+                             "and hit a dead PID. Open the solution folder directly so "
+                             "the workspace root stays narrow.")
             # Lead with the exception (head of stderr), then the tail.
             lines.extend(f"  {line}" for line in head)
             lines.extend(f"  {line}" for line in tail[-8:] if line.strip() and line not in head)
@@ -198,6 +206,7 @@ class RoslynManager:
     # -- LSP messages --------------------------------------------------
     def _send_initialize(self) -> None:
         assert self.transport is not None
+        debug(f"roslyn: sending initialize root={self.workspace_root} sln={self.solution_path}")
         root_uri = file_uri(self.workspace_root or os.path.expanduser("~"))
         params = {
             "processId": os.getpid(),
@@ -252,6 +261,9 @@ class RoslynManager:
             )
         with self._lock:
             self.state = "ready"
+        if self.on_ready is not None:
+            cb = self.on_ready
+            self.ui_dispatch(cb)
 
     def _on_message(self, message: dict) -> None:
         if "id" in message and ("result" in message or "error" in message):

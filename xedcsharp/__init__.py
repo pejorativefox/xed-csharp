@@ -95,8 +95,9 @@ try:
 
     from gi.repository import GObject, Gtk, Gdk, Gio, GLib, Pango, Xed  # type: ignore
 
-    from .logging_util import debug, marker
+    from .logging_util import debug, error, marker
     from .settings import SettingsStore
+    from . import deps as deps_mod
     from . import dotnet_cli
     from . import solution as solution_mod
     from . import roslyn as roslyn_mod
@@ -125,9 +126,14 @@ try:
         from gi.repository import GtkSource  # type: ignore
 
         _GTKSOURCE_AVAILABLE = True
-    except Exception:
+    except Exception as _e:
         GtkSource = None  # type: ignore
         _GTKSOURCE_AVAILABLE = False
+        try:
+            error(f"missing optional dependency: GtkSource-4 typelib ({_e}). "
+                  "Falling back to the custom completion popup.")
+        except Exception:
+            pass
 
     _GTK_AVAILABLE = True
     _note_imported = globals().get("marker")
@@ -139,9 +145,10 @@ except Exception:  # headless unit tests / missing typelib outside xed
     # the user must see the traceback instead of total silence.
     traceback.print_exc()
     try:
-        from .logging_util import marker as _fallback_marker
+        from .logging_util import error as _fallback_error
 
-        _fallback_marker("IMPORT-FALLBACK: GUI imports failed, dummy plugin active")
+        _fallback_error("IMPORT-FALLBACK: GUI imports failed, dummy plugin active. "
+                        "See traceback above; likely missing python3-gi or Xed typelib.")
     except Exception:
         pass
     class _DummyObject:
@@ -209,7 +216,8 @@ except Exception:  # headless unit tests / missing typelib outside xed
     from . import dap as dap_mod  # noqa: E402
     from . import breakpoints as breakpoints_mod  # noqa: E402
     from . import gscompletion as gs_mod  # noqa: E402
-    from .logging_util import debug  # noqa: E402
+    from . import deps as deps_mod  # noqa: E402
+    from .logging_util import debug, error  # noqa: E402
 
     _GTK_AVAILABLE = False
     _GTKSOURCE_AVAILABLE = False
@@ -284,6 +292,7 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             on_diagnostics=self._on_diagnostics,
             ui_dispatch=lambda fn: GLib.idle_add(fn),
             on_error=self._on_roslyn_error,
+            on_ready=self._on_roslyn_ready,
         )
         self.dap = dap_mod.DapSession(
             on_event=self._on_dap_event,
@@ -301,6 +310,7 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         self._dap_thread: int | None = None
         self._dap_project: str | None = None
         self._discovering_tests = False
+        self._completion_warned = ""
 
     # -- activation --------------------------------------------------
     def do_activate(self) -> None:
@@ -325,6 +335,7 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
                 debug("bottom panel (output) add failed")
             if self.debugpanel is not None and not _add_to_panel(bottom, self.debugpanel, "XedCSharpDebug", "C# Debug"):
                 debug("bottom panel (debug) add failed")
+        self._report_startup_deps()
 
         if self.explorer is not None:
             self._connect(self.explorer, "open-file", lambda _w, p: self._jump_to(p, 0, 0))
@@ -439,6 +450,45 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
     def do_update_state(self) -> None:
         return
 
+    def _report_startup_deps(self) -> None:
+        try:
+            settings = getattr(self, "settings", None)
+            try:
+                dotnet = str(settings.get("dotnet_executable")) if settings else "dotnet"
+            except Exception:
+                dotnet = "dotnet"
+            try:
+                roslyn_server = str(settings.get("roslyn_server")) if settings else "~/.dotnet/tools/roslyn-language-server"
+            except Exception:
+                roslyn_server = "~/.dotnet/tools/roslyn-language-server"
+            try:
+                netcoredbg_path = str(settings.get("netcoredbg_path")) if settings else "netcoredbg"
+            except Exception:
+                netcoredbg_path = "netcoredbg"
+            issues = deps_mod.check_all(
+                dotnet=dotnet or "dotnet",
+                roslyn_server=roslyn_server,
+                netcoredbg_path=netcoredbg_path,
+            )
+        except Exception as e:
+            try:
+                error(f"startup check failed: {e!r}")
+            except Exception:
+                pass
+            return
+        for issue in issues:
+            try:
+                error(f"startup check: {issue.log_line()}")
+            except Exception:
+                pass
+        if issues and self.output is not None:
+            try:
+                hard = [i for i in issues if not i.warn_only]
+                if hard:
+                    self.output.append("C# startup check: missing " + ", ".join(i.name for i in hard) + "\n")
+            except Exception:
+                pass
+
     # -- helpers -----------------------------------------------------
     @staticmethod
     def _safe(fn):
@@ -460,6 +510,42 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         if doc is None:
             return None
         return doc_path(doc)
+
+    def _open_doc_dir(self) -> str | None:
+        """Directory of any open document with a path (even if not active)."""
+        try:
+            docs = self._safe(lambda: list(self.window.get_documents())) or []
+        except Exception:
+            return None
+        for doc in docs:
+            try:
+                path = doc_path(doc)
+            except Exception:
+                continue
+            if path:
+                try:
+                    return os.path.dirname(path) or None
+                except Exception:
+                    return None
+        return None
+
+    @staticmethod
+    def _startup_dir() -> str | None:
+        """xed's working directory (where it was launched).
+
+        With no document open there is no active path, so discovery would
+        otherwise start at $HOME and miss a nearby .sln/.slnx. The process
+        cwd reflects the launch directory for terminal launches; the home
+        and crawl guards downstream keep menu launches safe.
+        """
+        try:
+            cwd = os.getcwd()
+        except Exception:
+            return None
+        try:
+            return cwd if os.path.isdir(cwd) else None
+        except Exception:
+            return None
 
     def _find_doc(self, path: str):
         try:
@@ -513,7 +599,13 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
                 self.completion_popup.dismiss()
             except Exception:
                 pass
-        start = self._active_path() or os.path.expanduser("~")
+        active = self._active_path()
+        start = active or self._open_doc_dir() or self._startup_dir() or os.path.expanduser("~")
+        try:
+            cwd = os.getcwd()
+        except Exception:
+            cwd = "?"
+        debug(f"refresh solution from {start} (active={active} cwd={cwd})")
         dotnet = self._dotnet()
         self._model = solution_mod.load_solution(start, dotnet)
         if self.explorer is not None:
@@ -527,6 +619,12 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             self._sync_doc(path)
         if self._model.path or self._model.projects:
             self._ensure_roslyn()
+        else:
+            self._warn_completion_once(
+                "no-solution",
+                "no .sln/.slnx or .csproj found; Roslyn not started so completion is unavailable.",
+                "No solution found — completion unavailable.",
+            )
 
     # -- roslyn ------------------------------------------------------
     def _ensure_roslyn(self) -> None:
@@ -534,9 +632,27 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             return
         if getattr(self.roslyn, "state", "") in ("starting", "ready"):
             return
+        if solution_mod.is_home_root(self._model.root_dir):
+            message = (f"Roslyn not started: workspace root is {self._model.root_dir}. "
+                       "Open the solution folder directly (starting it on your home "
+                       "directory makes the server crawl symlinks like Wine "
+                       "dosdevices/z: into /proc, where it crashes).")
+            try:
+                error(message)
+            except Exception:
+                pass
+            if self.output is not None:
+                self.output.append(message + "\n")
+                self.output.set_status("Roslyn not started — open the solution folder.")
+            return
         configured = str(self.settings.get("roslyn_server") or "~/.dotnet/tools/roslyn-language-server")
         argv = roslyn_mod.resolve_server_command(configured)
         if argv is None:
+            try:
+                error(f"Roslyn server not found: {configured}. "
+                      "Install: dotnet tool install --global roslyn-language-server")
+            except Exception:
+                pass
             if self.output is not None:
                 self.output.append(f"Roslyn server not found: {configured}\n")
                 self.output.append("Install: dotnet tool install --global roslyn-language-server\n")
@@ -550,6 +666,8 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
                 os.makedirs(log_dir, exist_ok=True)
         except OSError:
             log_dir = ""
+        debug(f"roslyn ensure: root={self._model.root_dir} sln={self._model.path} "
+              f"state={getattr(self.roslyn, 'state', '?')} argv0={argv[0] if argv else None}")
         ok = self.roslyn.start(
             self._model.path,
             self._model.root_dir,
@@ -558,21 +676,60 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             log_level=str(self.settings.get("roslyn_log_level") or "Information"),
             stderr_log_path=os.path.join(log_dir, "roslyn-stderr.log") if log_dir else None,
         )
-        if ok and self.output is not None:
+        debug(f"roslyn ensure: start returned {ok}")
+        if not ok:
+            try:
+                error("Roslyn failed to start (binary missing or spawn failed).")
+            except Exception:
+                pass
+            if self.output is not None:
+                self.output.append("Roslyn failed to start.\n")
+            return
+        if self.output is not None:
             self.output.append(f"Roslyn starting: {' '.join(argv)}\n")
 
     def _on_roslyn_error(self, message: str) -> None:
+        try:
+            error(message.splitlines()[0] if message else "Roslyn server error")
+        except Exception:
+            pass
         if self.output is not None:
             self.output.append(f"\n{message}\n")
             self.output.set_status("Roslyn server died — see Output. Refresh to restart.")
 
+    def _on_roslyn_ready(self) -> None:
+        try:
+            self._completion_warned = ""
+        except Exception:
+            pass
+        synced = 0
+        debug(f"roslyn ready: syncing open docs (open_docs={len(getattr(self.roslyn, 'open_docs', {}))})")
+        try:
+            for path, _doc in self._iter_csharp_docs():
+                try:
+                    self._sync_doc(path)
+                    synced += 1
+                except Exception as e:
+                    debug(f"ready sync failed for {path}: {e!r}")
+        except Exception as e:
+            debug(f"ready sync sweep failed: {e!r}")
+        debug(f"roslyn ready: synced {synced} doc(s)")
+        if self.output is not None:
+            try:
+                self.output.set_status(f"Roslyn ready — {synced} C# file(s) synced.")
+            except Exception:
+                pass
+
     def _sync_doc(self, path: str) -> None:
-        if getattr(self.roslyn, "state", "") != "ready":
+        state = getattr(self.roslyn, "state", "")
+        if state != "ready":
+            debug(f"sync skip {path}: roslyn {state!r}")
             return
         if not path.endswith(".cs"):
             return
         doc = self._find_doc(path)
         if doc is None:
+            debug(f"sync skip {path}: no open buffer")
             return
         text = buffer_text(doc)
         version = self._doc_versions.get(path, 0) + 1
@@ -584,8 +741,10 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         except Exception:
             known = False
         if known:
+            debug(f"sync did_change {path} v{version} ({len(text)} chars)")
             self.roslyn.did_change(path, version, text)
         else:
+            debug(f"sync did_open {path} v{version} ({len(text)} chars)")
             self.roslyn.did_open(path, "csharp", version, text)
 
     def _on_doc_saved(self, path: str) -> None:
@@ -795,8 +954,28 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         except Exception as e:
             debug(f"completion provider attach failed: {e!r}")
 
+    def _warn_completion_once(self, key: str, message: str, status: str = "") -> None:
+        if self._completion_warned == key:
+            return
+        self._completion_warned = key
+        try:
+            error(f"completion unavailable: {message}")
+        except Exception:
+            pass
+        if status and self.output is not None:
+            try:
+                self.output.set_status(status)
+            except Exception:
+                pass
+
     def _gs_resolve_path(self, buf) -> str | None:
         """Map a buffer to its .cs path (None for anything else)."""
+        try:
+            direct = doc_path(buf)
+            if direct and direct.endswith(".cs"):
+                return direct
+        except Exception:
+            pass
         try:
             for doc in self.window.get_documents():
                 try:
@@ -804,6 +983,11 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
                     if not same:
                         try:
                             same = hash(doc) == hash(buf)
+                        except Exception:
+                            same = False
+                    if not same:
+                        try:
+                            same = doc_path(doc) == doc_path(buf) and doc_path(doc) is not None
                         except Exception:
                             same = False
                     if same:
@@ -817,10 +1001,17 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
 
     def _gs_send_request(self, method: str, params: dict, callback):
         try:
-            return self.roslyn.request(method, params, callback)
+            request_id = self.roslyn.request(method, params, callback)
         except Exception as e:
             debug(f"framework completion request failed: {e!r}")
             return None
+        if request_id is None:
+            self._warn_completion_once(
+                f"send-{getattr(self.roslyn, 'state', '?')}",
+                f"{method} not sent: Roslyn server is {getattr(self.roslyn, 'state', '?')!r}.",
+                "Roslyn not running — completion unavailable. Refresh to restart.",
+            )
+        return request_id
 
     def _flush_completion_doc(self, path: str) -> None:
         """Synchronously push the buffer to Roslyn before a completion query.
@@ -855,11 +1046,31 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         """Force the GtkSource popup open (explicit invoke, VSCode Ctrl+Space)."""
         try:
             if not self._use_framework():
+                self._warn_completion_once(
+                    "no-framework",
+                    "GtkSource completion unavailable; install gir1.2-gtksource-4.",
+                    "Completion unavailable (no GtkSource).",
+                )
+                return False
+            if not self._roslyn_ready():
+                self._warn_completion_once(
+                    f"not-ready-{getattr(self.roslyn, 'state', '?')}",
+                    f"Roslyn server is {getattr(self.roslyn, 'state', '?')!r}; invoke ignored.",
+                    "Roslyn not ready — completion unavailable yet.",
+                )
                 return False
             view = self._safe(lambda: self.window.get_active_view())
             if view is None:
                 return False
-            return bool(gs_mod.show_completion(view, self._gs_provider))
+            opened = bool(gs_mod.show_completion(view, self._gs_provider))
+            debug(f"completion show: opened={opened}")
+            if not opened:
+                self._warn_completion_once(
+                    "show-failed",
+                    "GtkSource completion.start() refused the request.",
+                    "Completion popup would not open.",
+                )
+            return opened
         except Exception as e:
             debug(f"completion show failed: {e!r}")
             return False
@@ -871,8 +1082,19 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             return False
 
     def _on_completion_request(self, _tracker, path: str, line: int, char: int, trigger: str) -> None:
+        debug(f"completion-request: path={path} line={line} char={char} trigger={trigger} "
+              f"ready={self._roslyn_ready()} framework={self._use_framework()}")
         if not self._roslyn_ready():
+            self._warn_completion_once(
+                f"not-ready-{getattr(self.roslyn, 'state', '?')}",
+                f"Roslyn server is {getattr(self.roslyn, 'state', '?')!r}; completion skipped for {path}.",
+                "Roslyn not ready — completion unavailable yet.",
+            )
             return
+        try:
+            self._completion_warned = ""
+        except Exception:
+            pass
         if self._use_framework():
             # GtkSource interactive activation already populated on every
             # keystroke; the tracker no longer emits auto triggers in this
@@ -914,19 +1136,23 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
     def _on_completion_response(self, message: dict) -> None:
         pending, self._pending_completion = self._pending_completion, None
         if pending is None or self.completion_popup is None:
+            debug(f"fallback completion: dropped (pending={pending is not None}, "
+                  f"popup={self.completion_popup is not None})")
             return
         if message.get("error"):
-            debug(f"completion error: {message.get('error')}")
+            debug(f"fallback completion error: {message.get('error')}")
             return
         path = pending["path"]
         doc = self._find_doc(path)
         if doc is None:
+            debug(f"fallback completion: no buffer for {path}")
             return
         text = buffer_text(doc)
         # The buffer may have moved while Roslyn answered; parse against the
         # request offset but filter against what is typed NOW.
         offset = intel.position_to_offset(text, pending["line"], pending["char"])
         items = intel.parse_completion(message, text, offset)
+        debug(f"fallback completion: {len(items)} items for {path}")
         if not items:
             return
         try:
@@ -996,7 +1222,29 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             start_iter = doc.get_iter_at_offset(max(0, start))
             end_iter = doc.get_iter_at_offset(max(0, cur))
             doc.delete(start_iter, end_iter)
-            doc.insert(doc.get_iter_at_offset(max(0, start)), item.insert_text)
+            at = doc.get_iter_at_offset(max(0, start))
+            doc.insert(at, item.insert_text)
+            suffix = intel.completion_suffix(getattr(item, "kind", 0), item.insert_text)
+            if suffix:
+                try:
+                    ahead = at.copy()
+                    ahead.forward_char()
+                    if ahead.get_offset() > at.get_offset():
+                        existing = doc.get_text(at, ahead, True)
+                    else:
+                        existing = ""
+                except Exception:
+                    existing = ""
+                if existing != suffix:
+                    doc.insert(at, suffix)
+                    if suffix == "(":
+                        try:
+                            doc.insert(at, ")")
+                            doc.place_cursor(
+                                doc.get_iter_at_offset(at.get_offset() - 1)
+                            )
+                        except Exception as e:
+                            debug(f"completion pair insert failed: {e!r}")
             doc.end_user_action()
         except Exception as e:
             debug(f"completion apply failed: {e!r}")

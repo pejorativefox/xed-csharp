@@ -300,6 +300,9 @@ class ViewTracker(GObject.Object):
         path = doc_path(doc)
         if not path:
             return False
+        if ctrl or keyname in ("F12", "F9", "F5") or keyname.lower() == "space":
+            debug(f"key: name={keyname} ctrl={ctrl} shift={shift} alt={alt} "
+                  f"path={path} framework={self.framework_completion}")
         line, char = self._cursor_lsp(doc)
         plain = mods in (0, Gdk.ModifierType.SHIFT_MASK)
         if keyname == "F12" and plain:
@@ -310,11 +313,12 @@ class ViewTracker(GObject.Object):
             return True
         if ctrl and not shift and not alt and keyname.lower() == "space":
             if self.framework_completion:
-                # GtkSource owns the popup: its USER_REQUESTED activation
-                # calls our do_match/do_populate directly. Emitting a
-                # prefetch here would double-request; let the key reach
-                # the framework binding so the popup is forced open even
-                # with an empty prefix (VSCode Ctrl+Space).
+                # GtkSourceView binds Ctrl+Space to its own show-completion
+                # signal, which creates a framework-owned context and drives
+                # every registered provider (ours included). Let the binding
+                # run: consuming the key here would suppress the native flow
+                # that add_proposals requires (foreign contexts are rejected).
+                debug(f"completion invoke passthrough path={path} (native binding)")
                 return False
             self.emit("completion-request", path, line, char, "invoke")
             return True
@@ -357,6 +361,8 @@ class ViewTracker(GObject.Object):
         line, charpos = self._cursor_lsp(doc)
         if should_trigger_completion(char):
             # '.', '(' etc: member-access triggers always fire.
+            debug(f"completion trigger char={char!r} path={path} line={line} char={charpos} "
+                  f"framework={self.framework_completion}")
             self.emit("completion-request", path, line, charpos, char)
             return False
         if is_identifier_char(char):
@@ -368,10 +374,12 @@ class ViewTracker(GObject.Object):
             except Exception:
                 prefix = char
             if len(prefix) >= 2:
+                debug(f"completion auto path={path} line={line} char={charpos} prefix={prefix!r}")
                 self.emit("completion-request", path, line, charpos, "auto:" + prefix)
             elif len(prefix) >= 1:
                 # Single char: still refilter a visible list, but don't pop
                 # a new one up (plugin decides based on visibility).
+                debug(f"completion auto-refilter path={path} prefix={prefix!r}")
                 self.emit("completion-request", path, line, charpos, "auto:" + prefix)
         return False
 

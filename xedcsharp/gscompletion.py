@@ -46,7 +46,7 @@ except Exception:  # headless unit tests / missing typelib
     _AVAILABLE = False
 
 from . import intelligence as intel
-from .logging_util import debug
+from .logging_util import debug, error
 
 #: GtkSource4 ``populate`` is synchronous, so this module never blocks it:
 #: a fast local Roslyn usually answers in milliseconds and the async
@@ -255,6 +255,7 @@ class _RoslynCompletionProviderBase:
         self._lock = threading.Lock()
         self._cache: dict[str, _CacheEntry] = {}
         self._seq = 0
+        self._match_warned: set = set()
         # Legacy compat (fetch_sync/note_response tests + prefetch path).
         self._legacy_items: list = []
         self._legacy_key = None
@@ -300,6 +301,12 @@ class _RoslynCompletionProviderBase:
         except Exception:
             return False
 
+    def _warn_once(self, key: str, message: str) -> None:
+        if key in self._match_warned:
+            return
+        self._match_warned.add(key)
+        debug(message)
+
     def do_match(self, context):  # noqa: N802
         # VSCode shows completion while typing anywhere in C#; the
         # framework already throttles via the interactive delay, so stay
@@ -307,9 +314,14 @@ class _RoslynCompletionProviderBase:
         # suppressed the popup on first chars and after keywords.
         try:
             if not self._is_ready():
+                self._warn_once("not-ready", "completion do_match: Roslyn not ready")
                 return False
             _buf, path = self._buffer_path(context)
-            return bool(path)
+            if not path:
+                self._warn_once("no-path", "completion do_match: buffer is not a C# path")
+                return False
+            self._match_warned.clear()
+            return True
         except Exception:
             return False
 
@@ -349,6 +361,10 @@ class _RoslynCompletionProviderBase:
             buf = it.get_buffer()
             path = self._resolve_path(buf)
             if not path or not self._is_ready():
+                self._warn_once(
+                    f"populate-{bool(path)}-{self._is_ready()}",
+                    f"completion do_populate: path={path} ready={self._is_ready()}",
+                )
                 context.add_proposals(self, [], True)
                 return
             text = self._buffer_text(buf)
@@ -356,6 +372,8 @@ class _RoslynCompletionProviderBase:
             line, char = intel.offset_to_position(text, offset)
             prefix, _start = intel.prefix_at(text, offset)
             user_requested = self._is_user_requested(context)
+            debug(f"completion populate: path={path} line={line} char={char} "
+                  f"prefix={prefix!r} user={user_requested}")
             with self._lock:
                 entry = self._cache.get(path)
                 hit = cache_valid(entry, path, line, prefix)
@@ -364,20 +382,25 @@ class _RoslynCompletionProviderBase:
                 self._seq += 1
                 seq = self._seq
             if hit:
-                context.add_proposals(self, self._proposals_for(items), True)
+                proposals = self._proposals_for(items)
+                debug(f"completion populate: cache hit, {len(proposals)} proposals finished=True")
+                context.add_proposals(self, proposals, True)
                 if retrigger:
                     # Incomplete list: VSCode re-queries in the background
                     # while keeping the current rows visible.
+                    debug("completion populate: cache incomplete, re-querying")
                     self._request_async(
                         context, seq, path, line, char, text, offset,
                         user_requested, is_retrigger=True,
                     )
                 return
+            debug(f"completion populate: cache miss (have_entry={entry is not None}), "
+                  f"flushing doc and requesting")
             if self._flush_doc is not None:
                 try:
                     self._flush_doc(path)
-                except Exception:
-                    pass
+                except Exception as e:
+                    debug(f"completion populate: flush failed: {e!r}")
             # No usable cache: show nothing yet but keep the context open;
             # the async answer completes it (no freeze, no stale flash).
             context.add_proposals(self, [], False)
@@ -400,13 +423,22 @@ class _RoslynCompletionProviderBase:
         params = intel.position_params(path, line, char)
         params["context"] = {"triggerKind": kind, "triggerCharacter": trigger_char}
         prefix, _s = intel.prefix_at(text, offset)
+        debug(f"completion request: {path}:{line}:{char} triggerKind={kind} "
+              f"triggerChar={trigger_char!r} prefix={prefix!r} retrigger={is_retrigger}")
 
         def _cb(message: dict) -> None:
             try:
                 items = intel.parse_completion(message or {}, text, offset)
+                items = intel.rank_for_prefix(items, prefix)
                 incomplete = intel.completion_is_incomplete(message or {})
             except Exception:
                 items, incomplete = [], False
+            try:
+                err = (message or {}).get("error")
+                debug(f"completion response: {len(items)} items incomplete={incomplete} "
+                      f"error={err} path={path} line={line}")
+            except Exception:
+                pass
             with self._lock:
                 if seq < self._seq and not is_retrigger:
                     # Superseded by a newer populate; keep cache fresh but
@@ -416,6 +448,8 @@ class _RoslynCompletionProviderBase:
                         path=path, line=line, char=char, offset=offset,
                         prefix=prefix, time=time.monotonic(),
                     )
+                    debug(f"completion response: superseded seq={seq}, cache updated, "
+                          f"context untouched")
                     return
                 self._cache[path] = _CacheEntry(
                     items=list(items), is_incomplete=incomplete,
@@ -435,10 +469,14 @@ class _RoslynCompletionProviderBase:
                     cur_text = self._buffer_text(cur.get_buffer())
                     cur_line, _c = intel.offset_to_position(cur_text, cur.get_offset())
                     if cur_line != line:
+                        debug(f"completion response: cursor moved to line {cur_line}, "
+                              f"dropping delivery for line {line}")
                         return
                 except Exception:
                     pass
-                context.add_proposals(self, self._proposals_for(items), True)
+                proposals = self._proposals_for(items)
+                debug(f"completion deliver: {len(proposals)} proposals finished=True")
+                context.add_proposals(self, proposals, True)
             except Exception as e:
                 debug(f"roslyn async complete failed: {e!r}")
 
@@ -448,6 +486,10 @@ class _RoslynCompletionProviderBase:
             debug(f"roslyn completion send failed: {e!r}")
             request_id = None
         if request_id is None:
+            try:
+                error("completion request not sent: Roslyn server not running.")
+            except Exception:
+                pass
             try:
                 context.add_proposals(self, [], True)
             except Exception:
@@ -472,15 +514,24 @@ class _RoslynCompletionProviderBase:
             pass
         return None
 
-    def do_get_start_iter(self, context, proposal, it):  # noqa: N802
-        """Per-proposal start iter (VSCode textEdit-aware)."""
+    def do_get_start_iter(self, context, proposal):  # noqa: N802
+        """Per-proposal start iter (VSCode textEdit-aware).
+
+        Note the PyGObject shape: ``iter`` is an out-param in C, so this
+        takes ``(context, proposal)`` and returns ``(ok, iter)``.
+        """
         try:
-            if proposal is not None:
+            cur = None
+            try:
+                _ok, cur = context.get_iter()
+            except Exception:
+                cur = None
+            if proposal is not None and cur is not None:
                 try:
-                    buf = it.get_buffer()
+                    buf = cur.get_buffer()
                     text = self._buffer_text(buf)
-                    cur = it.get_offset()
-                    start_off = self._stored_range_start(proposal, text, cur)
+                    cur_off = cur.get_offset()
+                    start_off = self._stored_range_start(proposal, text, cur_off)
                     if start_off is None:
                         # Fall back to the insert range when it is set.
                         ins_s = getattr(proposal, "insert_start", None)
@@ -489,27 +540,27 @@ class _RoslynCompletionProviderBase:
                             isinstance(ins_s, int)
                             and isinstance(ins_e, int)
                             and ins_e > ins_s
-                            and 0 <= ins_s <= cur <= len(text)
+                            and 0 <= ins_s <= cur_off <= len(text)
                         ):
-                            between = text[ins_s:cur]
+                            between = text[ins_s:cur_off]
                             if not between or all(
                                 c == "_" or c.isalnum() for c in between
                             ):
                                 start_off = ins_s
                     if start_off is not None:
-                        it.assign(buf.get_iter_at_offset(start_off))
-                        return True
+                        return True, buf.get_iter_at_offset(start_off)
                 except Exception:
                     pass
-            start = it.copy()
-            while start.backward_char():
-                if not _is_word_char(start.get_char()):
-                    start.forward_char()
-                    break
-            it.assign(start)
-            return True
-        except Exception:
-            return False
+            if cur is not None:
+                start = cur.copy()
+                while start.backward_char():
+                    if not _is_word_char(start.get_char()):
+                        start.forward_char()
+                        break
+                return True, start
+        except Exception as e:
+            debug(f"roslyn start-iter failed: {e!r}")
+        return False, None
 
     def do_activate_proposal(self, proposal, it):  # noqa: N802
         """Apply the LSP textEdit range exactly (VSCode semantics)."""
@@ -537,6 +588,30 @@ class _RoslynCompletionProviderBase:
             try:
                 buf.delete(start, end)
                 buf.insert(start, insert)
+                # Chain the next char (VSCode-style): `count` -> `count.`,
+                # `WriteLine` -> `WriteLine(`. Skipped when already present
+                # (snippet terminators, lookahead char) to avoid doubling.
+                suffix = intel.completion_suffix(getattr(proposal, "kind", 0), insert)
+                if suffix:
+                    try:
+                        ahead = start.copy()
+                        ahead.forward_char()
+                        if ahead.get_offset() > start.get_offset():
+                            existing = buf.get_text(start, ahead, True)
+                        else:
+                            existing = ""
+                    except Exception:
+                        existing = ""
+                    if existing != suffix:
+                        try:
+                            buf.insert(start, suffix)
+                            if suffix == "(":
+                                buf.insert(start, ")")
+                                buf.place_cursor(
+                                    buf.get_iter_at_offset(start.get_offset() - 1)
+                                )
+                        except Exception as e:
+                            debug(f"roslyn suffix insert failed: {e!r}")
                 # Same-document additionalTextEdits (e.g. brace
                 # adjustments). Applied after the main edit by line/char
                 # so top-of-file inserts keep their position.
@@ -668,7 +743,38 @@ if _AVAILABLE:
     class RoslynCompletionProvider(  # type: ignore[misc,no-redef,attr-defined]
         _RoslynCompletionProviderBase, GObject.Object, GtkSource.CompletionProvider  # type: ignore[attr-defined]
     ):
-        """GtkSource provider; see _RoslynCompletionProviderBase for logic."""
+        """GtkSource provider; see _RoslynCompletionProviderBase for logic.
+
+        The do_* virtuals MUST be (re)declared on this GType itself:
+        PyGObject does not install trampolines for overrides inherited
+        from a plain-Python mixin, so without these the framework silently
+        falls back to the C defaults (match=True, empty proposals) and no
+        completion ever appears. Each wrapper delegates to the base logic.
+        """
+
+        def do_get_name(self):  # noqa: N802
+            return super().do_get_name()
+
+        def do_get_activation(self):  # noqa: N802
+            return super().do_get_activation()
+
+        def do_get_interactive_delay(self):  # noqa: N802
+            return super().do_get_interactive_delay()
+
+        def do_get_priority(self):  # noqa: N802
+            return super().do_get_priority()
+
+        def do_match(self, context):  # noqa: N802
+            return super().do_match(context)
+
+        def do_populate(self, context):  # noqa: N802
+            return super().do_populate(context)
+
+        def do_get_start_iter(self, context, proposal):  # noqa: N802
+            return super().do_get_start_iter(context, proposal)
+
+        def do_activate_proposal(self, proposal, it):  # noqa: N802
+            return super().do_activate_proposal(proposal, it)
 else:
     # Same duplicate-base-class hazard as RoslynProposal above: with no
     # GtkSource typelib the GObject/iface bases don't exist, so fall back
@@ -680,30 +786,35 @@ else:
 def show_completion(view, provider=None) -> bool:
     """Force the framework popup open (VSCode Ctrl+Space).
 
-    Starts USER_REQUESTED completion at the cursor. Returns True when
-    the request was issued; the provider's populate supplies the rows
-    asynchronously.
+    Mirrors GtkSourceView's own show-completion handler: the context is
+    created without an explicit position (the framework anchors it at the
+    cursor) and start() receives every registered provider. Hand-made
+    contexts are rejected by the framework (add_proposals asserts the
+    context is the completion's own), so this exact shape matters.
+    Returns True when the request was issued; the provider's populate
+    supplies the rows asynchronously.
     """
     try:
         completion = view.get_completion()
-    except Exception:
+    except Exception as e:
+        debug(f"completion show: no completion object: {e!r}")
         return False
     if completion is None:
+        debug("completion show: view.get_completion() is None")
         return False
     try:
-        buf = view.get_buffer()
-        mark = buf.get_insert()
-        it = buf.get_iter_at_mark(mark)
-    except Exception:
+        context = completion.create_context()
+    except Exception as e:
+        debug(f"completion show: create_context failed: {e!r}")
         return False
     try:
-        context = completion.create_context(it)
-    except Exception:
-        return False
-    try:
-        if provider is None:
-            return bool(completion.start([], context))
-        return bool(completion.start([provider], context))
+        registered = list(completion.get_providers() or [])
+        providers = registered or ([provider] if provider is not None else [])
+        debug(f"completion show: start providers={len(providers)} "
+              f"registered={[type(p).__name__ for p in registered]}")
+        started = bool(completion.start(providers, context))
+        debug(f"completion show: start returned {started}")
+        return started
     except TypeError:
         # Older bindings: start() takes no explicit provider list.
         try:
@@ -721,8 +832,10 @@ def attach_to_views(window, provider, attached: set) -> int:
     count = 0
     try:
         views = window.get_views()
-    except Exception:
+    except Exception as e:
+        debug(f"completion attach: get_views failed: {e!r}")
         return 0
+    debug(f"completion attach: {len(views or [])} views, {len(attached)} already attached")
     for view in views or []:
         try:
             key = hash(view)

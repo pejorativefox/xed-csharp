@@ -261,3 +261,63 @@ def test_parse_code_actions_sorted():
     assert [a.title for a in actions] == ["Add using", "Rename", "Info only"]
     assert actions[1].needs_resolve is True
     assert actions[0].needs_resolve is False
+
+
+def test_locals_first_in_completion():
+    response = {
+        "result": {
+            "items": [
+                {"label": "WriteLine", "kind": 2},
+                {"label": "count", "kind": 6},
+                {"label": "Write", "kind": 2},
+                {"label": "name", "kind": 6},
+            ]
+        }
+    }
+    items = intel.parse_completion(response, "cou", 3)
+    assert [i.label for i in items] == ["count", "name", "WriteLine", "Write"]
+
+
+def test_locals_first_keeps_sorttext_order_within_groups():
+    items = [
+        intel.CompletionItem(label="b", kind=6, sort_text="2"),
+        intel.CompletionItem(label="a", kind=2, sort_text="1"),
+        intel.CompletionItem(label="c", kind=6, sort_text="3"),
+    ]
+    assert [i.label for i in intel.locals_first(items)] == ["b", "c", "a"]
+
+
+def test_completion_suffix_by_kind():
+    assert intel.completion_suffix(6, "count") == "."
+    assert intel.completion_suffix(10, "Length") == "."
+    assert intel.completion_suffix(7, "Console") == "."
+    assert intel.completion_suffix(2, "WriteLine") == "("
+    assert intel.completion_suffix(3, "Write") == "("
+    assert intel.completion_suffix(4, "Foo") == "("
+    assert intel.completion_suffix(14, "if") == ""
+    assert intel.completion_suffix(0, "x") == ""
+    assert intel.completion_suffix("bogus", "x") == ""
+    assert intel.completion_suffix(2, "WriteLine($1)") == ""
+    assert intel.completion_suffix(2, "WriteLine()") == ""
+    assert intel.completion_suffix(6, "x;") == ""
+
+
+def test_rank_for_prefix_tiers_and_cull():
+    items = [
+        intel.CompletionItem(label="WriteLine", kind=2),
+        intel.CompletionItem(label="count", kind=6),
+        intel.CompletionItem(label="Counter", kind=7),
+        intel.CompletionItem(label="recount", kind=6),
+        intel.CompletionItem(label="Write", kind=2),
+        intel.CompletionItem(label="ToString", kind=2),
+    ]
+    assert [i.label for i in intel.rank_for_prefix(items, "cou")] == [
+        "count", "Counter", "recount",
+    ]
+    assert [i.label for i in intel.rank_for_prefix(items, "COU")] == [
+        "count", "Counter", "recount",
+    ]
+    assert intel.rank_for_prefix(items, "zzz") == []
+    assert [i.label for i in intel.rank_for_prefix(items, "")] == [
+        "count", "recount", "WriteLine", "Counter", "Write", "ToString",
+    ]
