@@ -29,6 +29,10 @@ done
 mkdir -p "$STYLE_DIR"
 cp "$SRC_DIR"/styles/*.xml "$STYLE_DIR/"
 
+LANG_DIR="${XED_LANG_DIR:-$HOME/.local/share/gtksourceview-4/language-specs}"
+mkdir -p "$LANG_DIR"
+cp "$SRC_DIR"/lang/*.lang "$LANG_DIR/"
+
 BIN_DIR="${XED_BIN_DIR:-$HOME/.local/bin}"
 mkdir -p "$BIN_DIR"
 cp "$SRC_DIR/xed-open" "$BIN_DIR/"
@@ -37,6 +41,7 @@ cp "$SRC_DIR/xed-code" "$BIN_DIR/"
 chmod +x "$BIN_DIR/xed-code"
 
 echo "Installed color schemes to $STYLE_DIR"
+echo "Installed language specs to $LANG_DIR"
 echo "Installed xed-open to $BIN_DIR (usage: xed-open 'file.cs[:line[:col]]')"
 echo "Installed xed-code to $BIN_DIR (usage: xed-code [folder])"
 echo "Fully quit xed first (File -> Quit all windows), then run:"
