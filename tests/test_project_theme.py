@@ -56,14 +56,14 @@ def _pump(Gtk, seconds):
         time.sleep(0.05)
 
 
-def _row_fg(browser, label):
+def _row_col(browser, label, col):
     store = browser.store
     found = {}
 
     def walk(tree_iter):
         current = tree_iter
         while current is not None:
-            found[store.get_value(current, 1)] = store.get_value(current, 4)
+            found[store.get_value(current, 1)] = store.get_value(current, col)
             try:
                 child = store.iter_children(current)
             except Exception:
@@ -77,6 +77,14 @@ def _row_fg(browser, label):
 
     walk(store.get_iter_first())
     return found.get(label)
+
+
+def _row_fg(browser, label):
+    return _row_col(browser, label, 4)
+
+
+def _row_fg_set(browser, label):
+    return _row_col(browser, label, browser._col_fg_set)
 
 
 def test_rebuild_keeps_colors_when_status_unchanged():
@@ -105,7 +113,10 @@ def test_rebuild_keeps_colors_when_status_unchanged():
     target = os.path.join(tmp, "a.txt")
     with open(target, "w") as f:
         f.write("one\n")
-    git("add", "a.txt")
+    clean = os.path.join(tmp, "b.txt")
+    with open(clean, "w") as f:
+        f.write("clean\n")
+    git("add", "a.txt", "b.txt")
     git("commit", "-m", "init")
     with open(target, "w") as f:
         f.write("one\ntwo\n")  # unstaged modification
@@ -118,11 +129,21 @@ def test_rebuild_keeps_colors_when_status_unchanged():
         browser.set_root(tmp)
         _pump(Gtk, 8)
         assert _row_fg(browser, "a.txt") == projectmode._gitstatus.COLOR_MODIFIED
+        assert _row_fg_set(browser, "a.txt") is True
+        assert _row_fg(browser, "b.txt") is None
+        assert _row_fg_set(browser, "b.txt") is False
+        assert browser._col_fg_set == 5
+        assert browser.store.get_n_columns() == 6
+        assert _row_fg_set(browser, os.path.basename(tmp) + "/") is True
         with open(target, "w") as f:
             f.write("one\ntwo\nthree\n")  # external edit, still M
         _pump(Gtk, 8)
         assert _row_fg(browser, "a.txt") == projectmode._gitstatus.COLOR_MODIFIED
+        assert _row_fg_set(browser, "a.txt") is True
+        assert _row_fg(browser, "b.txt") is None
+        assert _row_fg_set(browser, "b.txt") is False
         assert _row_fg(browser, os.path.basename(tmp) + "/") == projectmode._gitstatus.COLOR_MODIFIED
+        assert _row_fg_set(browser, os.path.basename(tmp) + "/") is True
     finally:
         try:
             browser.cleanup()

@@ -153,3 +153,123 @@ def test_git_timer_preserves_interval_through_fire():
         assert len(calls) == 1
     finally:
         projectmode.GLib = saved_glib
+
+
+class _FakeSaveTab:
+    """Hashable xed-tab stand-in with a document location."""
+
+    def __init__(self, state, path):
+        self._state = state
+        self._path = path
+
+    def get_state(self):
+        return self._state
+
+    def get_document(self):
+        path = self._path
+
+        class _Loc:
+            def get_path(self):
+                return path
+
+        class _Doc:
+            def get_location(self):
+                return _Loc()
+
+        return _Doc()
+
+
+def _save_plugin(tmp, git_calls, tree_calls):
+    browser = types.SimpleNamespace(
+        _root_dir=tmp,
+        _git_generation=3,
+        _tree_generation=7,
+        _arm_git_timer=lambda ms, gen, interval=None: git_calls.append((ms, gen, interval)),
+        _arm_tree_timer=lambda ms, gen: tree_calls.append((ms, gen)),
+    )
+    plugin = projectmode.ProjectModePlugin.__new__(projectmode.ProjectModePlugin)
+    plugin.browser = browser
+    plugin._root_dir = None
+    plugin._tab_states = {}
+    plugin._tab_signal_ids = []
+    return plugin
+
+
+def test_save_completion_arms_git_refresh_without_storm_gate():
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, "a.txt")
+        with open(target, "w") as f:
+            f.write("x")
+        git_calls, tree_calls = [], []
+        plugin = _save_plugin(tmp, git_calls, tree_calls)
+        window = types.SimpleNamespace()
+        tab = _FakeSaveTab("XED_TAB_STATE_SAVING", target)
+        plugin._tab_states[hash(tab)] = "XED_TAB_STATE_SAVING"
+        tab._state = "XED_TAB_STATE_NORMAL"
+        plugin._on_project_tab_state_changed(window, tab)
+        assert git_calls == [(projectmode.GIT_DIR_DEBOUNCE_MS, 3, 0.0)]
+        assert tree_calls == [(projectmode.TREE_REFRESH_DEBOUNCE_MS, 7)]
+
+
+def test_non_save_state_change_arms_nothing():
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, "a.txt")
+        with open(target, "w") as f:
+            f.write("x")
+        git_calls, tree_calls = [], []
+        plugin = _save_plugin(tmp, git_calls, tree_calls)
+        window = types.SimpleNamespace()
+        # NORMAL -> NORMAL: typing/navigation noise, not a save.
+        tab = _FakeSaveTab("XED_TAB_STATE_NORMAL", target)
+        plugin._tab_states[hash(tab)] = "XED_TAB_STATE_NORMAL"
+        tab._state = "XED_TAB_STATE_NORMAL"
+        plugin._on_project_tab_state_changed(window, tab)
+        # Untitled buffer completing a "save" with no on-disk path.
+        ghost = _FakeSaveTab("XED_TAB_STATE_SAVING", None)
+        plugin._tab_states[hash(ghost)] = "XED_TAB_STATE_SAVING"
+        ghost._state = "XED_TAB_STATE_NORMAL"
+        plugin._on_project_tab_state_changed(window, ghost)
+        # Save outside the project root must not refresh this browser.
+        foreign = _FakeSaveTab("XED_TAB_STATE_SAVING", os.path.join(tempfile.gettempdir(), "x.txt"))
+        plugin._tab_states[hash(foreign)] = "XED_TAB_STATE_SAVING"
+        foreign._state = "XED_TAB_STATE_NORMAL"
+        plugin._on_project_tab_state_changed(window, foreign)
+        assert git_calls == []
+        assert tree_calls == []
+
+
+def test_tab_added_removed_track_state():
+    with tempfile.TemporaryDirectory() as tmp:
+        target = os.path.join(tmp, "a.txt")
+        with open(target, "w") as f:
+            f.write("x")
+        git_calls, tree_calls = [], []
+        plugin = _save_plugin(tmp, git_calls, tree_calls)
+        window = types.SimpleNamespace()
+        tab = _FakeSaveTab("XED_TAB_STATE_NORMAL", target)
+        plugin._on_project_tab_added(window, tab)
+        assert plugin._tab_states.get(hash(tab)) == "XED_TAB_STATE_NORMAL"
+        assert git_calls and tree_calls  # save-as / opened file under root
+        plugin._on_project_tab_removed(window, tab)
+        assert hash(tab) not in plugin._tab_states
+
+
+def test_git_monitor_target_resolves_repo_root():
+    import shutil
+    import subprocess
+
+    if shutil.which("git") is None:
+        pytest.skip("no git")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["git", "init"], cwd=tmp, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        sub = os.path.join(tmp, "src", "deep")
+        os.makedirs(sub)
+        assert projectmode.git_monitor_target(sub) == os.path.join(tmp, ".git")
+        assert projectmode.git_monitor_target(tmp) == os.path.join(tmp, ".git")
+
+
+def test_git_monitor_target_falls_back_without_repo():
+    with tempfile.TemporaryDirectory() as tmp:
+        assert projectmode.git_monitor_target(tmp) == os.path.join(tmp, ".git")
+        assert projectmode.git_monitor_target("") is None

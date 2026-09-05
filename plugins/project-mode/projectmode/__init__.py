@@ -445,6 +445,28 @@ def collect_watch_dirs(
     return out
 
 
+def git_monitor_target(folder: str) -> str | None:
+    """`.git` path to monitor for folder (headless-safe, no GTK/Gio).
+
+    Resolves the enclosing repo root so opening a subdirectory still
+    watches the real `.git`; falls back to `folder/.git` when the root
+    cannot be determined. Returns None for an empty folder.
+    """
+    try:
+        if not folder:
+            return None
+        git_root = None
+        try:
+            if _gitstatus is not None:
+                git_root = _gitstatus.find_git_root(folder)
+        except Exception:
+            git_root = None
+        base = git_root or folder
+        return os.path.join(base, ".git")
+    except Exception:
+        return None
+
+
 def git_event_paths(file_obj, other_obj=None) -> tuple[str | None, str | None]:
     """Best-effort Gio.File -> filesystem path (headless-safe)."""
     def _one(obj) -> str | None:
@@ -559,6 +581,7 @@ if Gtk is not None:
             self._col_path = 2
             self._col_kind = 3
             self._col_fg = 4
+            self._col_fg_set = 5
             self._git_statuses: dict = {}
             self._git_generation = 0
             self._monitors: list = []
@@ -576,7 +599,7 @@ if Gtk is not None:
             header.pack_start(self._root_label, True, True, 0)
             self.pack_start(header, False, False, 0)
 
-            self.store = Gtk.TreeStore(str, str, str, str, str)
+            self.store = Gtk.TreeStore(str, str, str, str, str, bool)
             self.tree = Gtk.TreeView.new_with_model(self.store)
             self.tree.set_headers_visible(False)
             col = Gtk.TreeViewColumn("Files")
@@ -587,6 +610,7 @@ if Gtk is not None:
             col.add_attribute(icon, "icon-name", self._col_icon)
             col.add_attribute(cell, "text", self._col_label)
             col.add_attribute(cell, "foreground", self._col_fg)
+            col.add_attribute(cell, "foreground-set", self._col_fg_set)
             self.tree.append_column(col)
             self.tree.connect("row-activated", self._on_row_activated)
             try:
@@ -624,10 +648,10 @@ if Gtk is not None:
             try:
                 root_iter = self.store.append(
                     None,
-                    [_TREE_FOLDER_ICON, base + "/", folder, "folder", None],
+                    [_TREE_FOLDER_ICON, base + "/", folder, "folder", None, False],
                 )
                 self.store.append(
-                    root_iter, [_TREE_FILE_ICON, "Loading…", folder, "loading", None]
+                    root_iter, [_TREE_FILE_ICON, "Loading…", folder, "loading", None, False]
                 )
             except Exception:
                 root_iter = None
@@ -772,7 +796,7 @@ if Gtk is not None:
             try:
                 root_iter = self.store.append(
                     None,
-                    [_TREE_FOLDER_ICON, base + "/", folder, "folder", None],
+                    [_TREE_FOLDER_ICON, base + "/", folder, "folder", None, False],
                 )
             except Exception:
                 return False
@@ -794,6 +818,7 @@ if Gtk is not None:
                     root_color = None
                 try:
                     self.store.set_value(root_iter, self._col_fg, root_color)
+                    self.store.set_value(root_iter, self._col_fg_set, root_color is not None)
                 except Exception:
                     pass
             except Exception as e:
@@ -842,19 +867,20 @@ if Gtk is not None:
                 # folder color once the subtree aggregate is known.
                 folder_iter = self.store.append(
                     parent,
-                    [_TREE_FOLDER_ICON, node.name + "/", node.path, "folder", None],
+                    [_TREE_FOLDER_ICON, node.name + "/", node.path, "folder", None, False],
                 )
                 for child in node.children:
                     child_colors.append(self._append_node(folder_iter, child, statuses))
                 color = gs.aggregate_dir_color(child_colors) if gs is not None else None
                 try:
                     self.store.set_value(folder_iter, self._col_fg, color)
+                    self.store.set_value(folder_iter, self._col_fg_set, color is not None)
                 except Exception:
                     pass
                 return color
             color = gs.color_for_path(statuses, node.path) if gs is not None else None
             self.store.append(
-                parent, [_TREE_FILE_ICON, node.name, node.path, "file", color]
+                parent, [_TREE_FILE_ICON, node.name, node.path, "file", color, color is not None]
             )
             return color
 
@@ -991,9 +1017,15 @@ if Gtk is not None:
                     current = self.store.get_value(root_iter, self._col_fg)
                 except Exception:
                     current = object()
-                if current != root_color:
+                try:
+                    current_set = self.store.get_value(root_iter, self._col_fg_set)
+                except Exception:
+                    current_set = object()
+                want_set = root_color is not None
+                if current != root_color or current_set != want_set:
                     try:
                         self.store.set_value(root_iter, self._col_fg, root_color)
+                        self.store.set_value(root_iter, self._col_fg_set, want_set)
                     except Exception:
                         pass
             except Exception as e:
@@ -1025,9 +1057,15 @@ if Gtk is not None:
                     current = self.store.get_value(tree_iter, self._col_fg)
                 except Exception:
                     current = object()
-                if current != color:
+                try:
+                    current_set = self.store.get_value(tree_iter, self._col_fg_set)
+                except Exception:
+                    current_set = object()
+                want_set = color is not None
+                if current != color or current_set != want_set:
                     try:
                         self.store.set_value(tree_iter, self._col_fg, color)
+                        self.store.set_value(tree_iter, self._col_fg_set, want_set)
                     except Exception:
                         pass
                 return color
@@ -1048,9 +1086,15 @@ if Gtk is not None:
                 current = self.store.get_value(tree_iter, self._col_fg)
             except Exception:
                 current = object()
-            if current != color:
+            try:
+                current_set = self.store.get_value(tree_iter, self._col_fg_set)
+            except Exception:
+                current_set = object()
+            want_set = color is not None
+            if current != color or current_set != want_set:
                 try:
                     self.store.set_value(tree_iter, self._col_fg, color)
+                    self.store.set_value(tree_iter, self._col_fg_set, want_set)
                 except Exception:
                     pass
             return color
@@ -1078,14 +1122,14 @@ if Gtk is not None:
                     except Exception:
                         continue
                     watched.append(monitor)
-                git_path = os.path.join(folder, ".git")
+                git_path = git_monitor_target(folder)
                 try:
                     git_monitor = None
-                    if os.path.isdir(git_path):
+                    if git_path is not None and os.path.isdir(git_path):
                         git_monitor = Gio.File.new_for_path(git_path).monitor_directory(
                             Gio.FileMonitorFlags.NONE, None
                         )
-                    elif os.path.isfile(git_path):
+                    elif git_path is not None and os.path.isfile(git_path):
                         git_monitor = Gio.File.new_for_path(git_path).monitor_file(
                             Gio.FileMonitorFlags.NONE, None
                         )
@@ -1314,6 +1358,8 @@ class ProjectModePlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
         self.browser = None
         self._window_key_id = None
         self._root_dir = None
+        self._tab_states: dict = {}
+        self._tab_signal_ids: list = []
 
     def do_activate(self) -> None:
         if Gtk is None or Gio is None:
@@ -1349,6 +1395,17 @@ class ProjectModePlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
         except Exception as e:
             _debug(f"window keys connect failed: {e!r}")
             self._window_key_id = None
+        for signal, handler in (
+            ("tab-added", self._on_project_tab_added),
+            ("tab-removed", self._on_project_tab_removed),
+            ("active-tab-state-changed", self._on_project_tab_state_changed),
+        ):
+            try:
+                self._tab_signal_ids.append(
+                    self.window.connect(signal, handler)
+                )
+            except Exception as e:
+                _debug(f"window {signal} connect failed: {e!r}")
 
         self._startup_load()
 
@@ -1359,6 +1416,19 @@ class ProjectModePlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
             except Exception:
                 pass
         self._window_key_id = None
+        for handler_id in list(getattr(self, "_tab_signal_ids", []) or []):
+            try:
+                self.window.disconnect(handler_id)
+            except Exception:
+                pass
+        try:
+            self._tab_signal_ids = []
+        except Exception:
+            pass
+        try:
+            self._tab_states = {}
+        except Exception:
+            pass
 
         if self.browser is not None:
             try:
@@ -1410,6 +1480,117 @@ class ProjectModePlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
         except Exception:
             return False
         return self._handle_global_key(keyname, ctrl, shift, alt)
+
+    def _project_saved_path(self, tab):
+        """On-disk path for a tab, or None for untitled/unresolvable."""
+        try:
+            doc = tab.get_document()
+        except Exception:
+            return None
+        if doc is None:
+            return None
+        try:
+            location = doc.get_location()
+        except Exception:
+            return None
+        if location is None:
+            return None
+        try:
+            path = location.get_path()
+        except Exception:
+            return None
+        return path if isinstance(path, str) and path else None
+
+    def _refresh_browser_for_path(self, path: str | None) -> None:
+        """Re-query git colors (+ tree) when a saved path is under the root."""
+        if not path:
+            return
+        try:
+            browser = self.browser
+        except Exception:
+            return
+        if browser is None:
+            return
+        try:
+            root = browser._root_dir or self._root_dir
+        except Exception:
+            root = None
+        if not root:
+            return
+        try:
+            if _rel_within(path, root) is None:
+                return
+        except Exception:
+            return
+        try:
+            arm_git = getattr(browser, "_arm_git_timer", None)
+            if callable(arm_git):
+                arm_git(GIT_DIR_DEBOUNCE_MS, browser._git_generation, 0.0)
+        except Exception:
+            pass
+        try:
+            arm_tree = getattr(browser, "_arm_tree_timer", None)
+            if callable(arm_tree):
+                arm_tree(TREE_REFRESH_DEBOUNCE_MS, browser._tree_generation)
+        except Exception:
+            pass
+
+    def _on_project_tab_added(self, window, tab) -> None:
+        try:
+            states = self._tab_states
+        except Exception:
+            return
+        try:
+            states[hash(tab)] = str(tab.get_state())
+        except Exception:
+            pass
+        try:
+            self._refresh_browser_for_path(self._project_saved_path(tab))
+        except Exception:
+            pass
+
+    def _on_project_tab_removed(self, _window, tab) -> None:
+        try:
+            states = self._tab_states
+        except Exception:
+            return
+        try:
+            states.pop(hash(tab), None)
+        except Exception:
+            pass
+
+    def _on_project_tab_state_changed(self, window, *args) -> None:
+        """Refresh colors when a save completes (SAVING -> NORMAL)."""
+        tab = None
+        for candidate in args:
+            if candidate is not None and hasattr(candidate, "get_document"):
+                tab = candidate
+                break
+        if tab is None:
+            try:
+                tab = window.get_active_tab()
+            except Exception:
+                return
+        if tab is None:
+            return
+        try:
+            state = str(tab.get_state())
+        except Exception:
+            return
+        try:
+            key = hash(tab)
+        except Exception:
+            return
+        try:
+            previous = self._tab_states.get(key, "")
+            self._tab_states[key] = state
+        except Exception:
+            previous = ""
+        if "SAVING" in previous and state.endswith("NORMAL"):
+            try:
+                self._refresh_browser_for_path(self._project_saved_path(tab))
+            except Exception:
+                pass
 
     def _startup_load(self) -> None:
         """Load a project folder at window startup (`code .` equivalent).
