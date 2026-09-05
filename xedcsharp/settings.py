@@ -23,6 +23,7 @@ DEFAULTS = {
     "netcoredbg_path": "netcoredbg",
     "debug_args": "",
     "stop_at_entry": False,
+    "hide_documents_panel": True,
 }
 
 
