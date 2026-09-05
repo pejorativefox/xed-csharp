@@ -1879,8 +1879,15 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
     def _show_fuzzy_finder(self) -> None:
         files = list(getattr(self, "_solution_files", None) or [])
         if not files:
-            if self.output is not None:
-                self.output.set_status("No files in solution — open a solution first.")
+            debug("fuzzy: index empty, refreshing synchronously")
+            try:
+                self._refresh_solution()
+            except Exception as e:
+                debug(f"fuzzy refresh failed: {e!r}")
+            files = list(getattr(self, "_solution_files", None) or [])
+        debug(f"fuzzy: {len(files)} file(s) indexed")
+        if not files:
+            self._open_solution_folder()
             return
         if FuzzyFinderDialog is None:
             debug("fuzzy finder unavailable (no GTK)")

@@ -2,10 +2,16 @@
 
 import os
 import sys
+import types
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import xedcsharp
 from xedcsharp import intelligence as intel
+
+HAVE_PLUGIN = hasattr(xedcsharp, "CSharpDevKitPlugin") and hasattr(
+    xedcsharp.CSharpDevKitPlugin, "_show_fuzzy_finder"
+)
 
 
 def test_score_orders_tight_over_gappy():
@@ -39,3 +45,65 @@ def test_find_ranks_limits_and_culls():
     assert intel.fuzzy_find("", paths, limit=2) == paths[:2]
     many = [f"/repo/f{i:03d}.cs" for i in range(10)]
     assert len(intel.fuzzy_find("", many, limit=3)) == 3
+
+
+def test_empty_index_falls_back_to_folder_picker():
+    if not HAVE_PLUGIN:
+        return
+    cls = xedcsharp.CSharpDevKitPlugin
+    refreshed: list = []
+    picked: list = []
+    ns = types.SimpleNamespace(
+        _solution_files=[],
+        output=None,
+        _refresh_solution=lambda: refreshed.append(True),
+        _open_solution_folder=lambda: picked.append(True),
+    )
+    cls._show_fuzzy_finder(ns)
+    assert refreshed == [True]
+    assert picked == [True]
+
+
+def test_indexed_files_run_dialog():
+    if not HAVE_PLUGIN:
+        return
+    cls = xedcsharp.CSharpDevKitPlugin
+    shown: dict = {}
+    jumped: list = []
+
+    class FakeDialog:
+        def __init__(self, parent=None):
+            shown["parent"] = parent
+
+        def set_files(self, items):
+            shown["items"] = items
+
+        def connect(self, signal, callback):
+            shown["callback"] = callback
+
+        def run(self):
+            shown["ran"] = True
+
+        def destroy(self):
+            shown["destroyed"] = True
+
+    saved = xedcsharp.FuzzyFinderDialog
+    xedcsharp.FuzzyFinderDialog = FakeDialog
+    window = object()
+    ns = types.SimpleNamespace(
+        _solution_files=["/repo/A.cs"],
+        _model=types.SimpleNamespace(root_dir="/repo"),
+        window=window,
+        output=None,
+        _jump_to=lambda p, line, char: jumped.append(p),
+    )
+    try:
+        cls._show_fuzzy_finder(ns)
+    finally:
+        xedcsharp.FuzzyFinderDialog = saved
+    assert shown["parent"] is window
+    assert shown["items"] == [("A.cs", "/repo/A.cs")]
+    assert shown.get("ran") is True
+    shown["callback"](None, "/repo/A.cs")
+    assert jumped == ["/repo/A.cs"]
+    assert shown.get("destroyed") is True
