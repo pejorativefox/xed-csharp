@@ -230,6 +230,7 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
         self._tab_states: dict = {}
         self._debounce_timer = None
         self._pending_paths: set = set()
+        self._doc_handlers: dict = {}
 
     # -- lifecycle ---------------------------------------------------
     def do_activate(self) -> None:
@@ -255,6 +256,13 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
             self._pending_paths.clear()
         except Exception:
             pass
+        for _key, entry in list(self._doc_handlers.items()):
+            try:
+                watched_doc, handler_id = entry
+                watched_doc.disconnect(handler_id)
+            except Exception:
+                pass
+        self._doc_handlers = {}
         if GLib is not None and self._debounce_timer is not None:
             try:
                 GLib.source_remove(self._debounce_timer)
@@ -276,13 +284,25 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
     # -- signals -----------------------------------------------------
     def _on_tab_added(self, _window, tab) -> None:
         try:
-            path = doc_path(tab.get_document())
+            doc = tab.get_document()
         except Exception:
-            path = None
-        if path:
-            self._schedule_paths([path])
+            doc = None
+        if doc is not None:
+            self._watch_doc(doc)
+            try:
+                path = doc_path(doc)
+            except Exception:
+                path = None
+            if path:
+                self._schedule_paths([path])
 
     def _on_tab_removed(self, _window, tab) -> None:
+        try:
+            doc = tab.get_document()
+        except Exception:
+            doc = None
+        if doc is not None:
+            self._unwatch_doc(doc)
         try:
             path = doc_path(tab.get_document())
         except Exception:
@@ -328,6 +348,43 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
             if path:
                 self._schedule_paths([path])
 
+    # -- per-doc change tracking (live gutter while typing) ---------------
+    def _watch_doc(self, doc) -> None:
+        try:
+            key = id(doc)
+        except Exception:
+            return
+        if key in self._doc_handlers:
+            return
+        try:
+            handler_id = doc.connect("changed", self._on_doc_changed)
+        except Exception as e:
+            _debug(f"doc watch failed: {e!r}")
+            return
+        self._doc_handlers[key] = (doc, handler_id)
+
+    def _unwatch_doc(self, doc) -> None:
+        try:
+            key = id(doc)
+        except Exception:
+            return
+        entry = self._doc_handlers.pop(key, None)
+        if entry is None:
+            return
+        watched_doc, handler_id = entry
+        try:
+            watched_doc.disconnect(handler_id)
+        except Exception:
+            pass
+
+    def _on_doc_changed(self, doc) -> None:
+        try:
+            path = doc_path(doc)
+        except Exception:
+            path = None
+        if path:
+            self._schedule_paths([path])
+
     # -- scheduling --------------------------------------------------
     def _schedule_active(self) -> None:
         try:
@@ -336,6 +393,7 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
             return
         paths = []
         for doc in docs:
+            self._watch_doc(doc)
             try:
                 path = doc_path(doc)
             except Exception:
@@ -388,17 +446,55 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
         if _diffparse is None or not path:
             return
         generation = self._generations.get(path, 0)
+        snapshot = self._snapshot_doc(path)
         try:
             thread = threading.Thread(
-                target=self._query_thread, args=(path, generation), daemon=True
+                target=self._query_thread,
+                args=(path, generation, snapshot),
+                daemon=True,
             )
             thread.start()
         except Exception as e:
             _debug(f"refresh spawn failed: {e!r}")
 
-    def _query_thread(self, path: str, generation: int) -> None:
+    def _snapshot_doc(self, path: str):
+        """UI-thread snapshot: buffer text when dirty, else just a line count.
+
+        Gtk buffers must only be touched on the UI thread; the worker thread
+        below consumes this snapshot so marks align with unsaved edits.
+        """
+        doc = self._find_doc(path)
+        if doc is None:
+            return None
+        try:
+            modified = bool(doc.get_modified())
+        except Exception:
+            modified = False
+        try:
+            line_count = int(doc.get_line_count())
+        except Exception:
+            line_count = 0
+        if line_count <= 0:
+            try:
+                start, end = doc.get_bounds()
+                line_count = end.get_line() + 1
+            except Exception:
+                line_count = 0
+        text = None
+        if modified:
+            try:
+                start, end = doc.get_bounds()
+                text = doc.get_text(start, end, False)
+            except Exception:
+                text = None
+        return {"modified": modified, "line_count": line_count, "text": text}
+
+    def _query_thread(self, path: str, generation: int, snapshot) -> None:
         dp = _diffparse
-        line_count = self._doc_line_count(path)
+        if isinstance(snapshot, dict) and snapshot.get("line_count"):
+            line_count = snapshot["line_count"]
+        else:
+            line_count = self._doc_line_count(path)
         result: dict = {"added": [], "modified": [], "deleted": []}
         try:
             folder = os.path.dirname(path)
@@ -408,7 +504,17 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
                 if status == "??":
                     result = dp.untracked_marks(line_count)
                 elif status:
-                    text = dp.get_diff_text(root, path)
+                    relpath = os.path.relpath(path, root)
+                    use_buffer = (
+                        isinstance(snapshot, dict)
+                        and snapshot.get("modified")
+                        and snapshot.get("text") is not None
+                        and not dp.buffer_matches_head(root, relpath, snapshot["text"])
+                    )
+                    if use_buffer:
+                        text = dp.get_buffer_diff_text(root, relpath, snapshot["text"])
+                    else:
+                        text = dp.get_diff_text(root, path)
                     hunks = dp.parse_unified_diff(text)
                     result = {
                         "added": dp.clamp_lines(hunks["added"], line_count),
@@ -470,9 +576,12 @@ class GitInlineDiffPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignor
             return False
         for category, _lines in categories:
             try:
-                doc.remove_source_marks(category, start, end)
-            except Exception:
-                pass
+                # NOTE: argument order is (start, end, category) — the
+                # category-first order raises TypeError (silently ignored
+                # below), which used to make stale marks stick forever.
+                doc.remove_source_marks(start, end, category)
+            except Exception as e:
+                _debug(f"remove marks {category} failed: {e!r}")
         try:
             line_count = doc.get_line_count()
         except Exception:

@@ -82,3 +82,74 @@ def test_set_root_refuses_unsafe():
     ns._set_root(home)
     assert called == [], "unsafe $HOME root must be refused"
     assert ns._root_dir is None
+
+
+def test_working_tree_refresh_bypasses_storm_gate():
+    import time
+
+    if not hasattr(projectmode, "ProjectBrowser"):
+        print("SKIP (no Gtk)")
+        return
+    saved_glib = projectmode.GLib
+    timers = []
+    projectmode.GLib = types.SimpleNamespace(
+        timeout_add=lambda ms, cb, *a: timers.append((ms, cb, a)) or len(timers),
+        source_remove=lambda i: None,
+    )
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            ns = types.SimpleNamespace(
+                _root_dir=tmp,
+                _git_generation=0,
+                _last_git_refresh=time.monotonic(),
+                _refresh_timer=None,
+                _refresh_interval_s=projectmode.GIT_REFRESH_MIN_INTERVAL_S,
+                _query_git_thread=lambda *a: None,
+            )
+            ns.refresh_git_statuses = types.MethodType(
+                projectmode.ProjectBrowser.refresh_git_statuses, ns)
+            ns._arm_git_timer = types.MethodType(
+                projectmode.ProjectBrowser._arm_git_timer, ns)
+            ns._on_git_changed_fire = lambda *a: False
+            # Default gate: refreshed a moment ago -> re-arm, no new query.
+            ns.refresh_git_statuses()
+            assert ns._git_generation == 0
+            assert timers, "gated refresh must re-arm a timer"
+            # Working-tree edit: zero interval proceeds immediately.
+            queries = []
+            ns._query_git_thread = lambda *a: queries.append(a)
+            ns.refresh_git_statuses(min_interval_s=0.0)
+            assert ns._git_generation == 1
+    finally:
+        projectmode.GLib = saved_glib
+
+
+def test_git_timer_preserves_interval_through_fire():
+    if not hasattr(projectmode, "ProjectBrowser"):
+        print("SKIP (no Gtk)")
+        return
+    saved_glib = projectmode.GLib
+    projectmode.GLib = types.SimpleNamespace(
+        timeout_add=lambda ms, cb, *a: 7,
+        source_remove=lambda i: None,
+    )
+    try:
+        ns = types.SimpleNamespace(
+            _git_generation=5,
+            _refresh_timer=None,
+            _refresh_interval_s=projectmode.GIT_REFRESH_MIN_INTERVAL_S,
+        )
+        ns._arm_git_timer = types.MethodType(
+            projectmode.ProjectBrowser._arm_git_timer, ns)
+        ns._on_git_changed_fire = types.MethodType(
+            projectmode.ProjectBrowser._on_git_changed_fire, ns)
+        calls = []
+        ns.refresh_git_statuses = lambda *a, **k: calls.append(k)
+        ns._arm_git_timer(500, 5, 0.0)
+        assert ns._refresh_interval_s == 0.0
+        ns._on_git_changed_fire(5)
+        assert calls == [{"min_interval_s": 0.0}]
+        ns._on_git_changed_fire(4)  # stale generation: ignored
+        assert len(calls) == 1
+    finally:
+        projectmode.GLib = saved_glib

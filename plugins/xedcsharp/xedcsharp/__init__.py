@@ -893,7 +893,7 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             except Exception:
                 pass
         try:
-            doc.remove_source_marks(DIAG_MARK_CATEGORY, start, end)
+            doc.remove_source_marks(start, end, DIAG_MARK_CATEGORY)
         except Exception:
             pass
         for diag in items:
@@ -1856,7 +1856,7 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
     def _clear_marks(self, doc, category: str) -> None:
         try:
             start, end = doc.get_bounds()
-            doc.remove_source_marks(category, start, end)
+            doc.remove_source_marks(start, end, category)
         except Exception:
             pass
 

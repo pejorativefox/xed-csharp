@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
+import tempfile
 
 GIT_TIMEOUT_S = 10
 
@@ -144,6 +146,82 @@ def get_diff_text(repo_root: str, path: str, timeout: int = GIT_TIMEOUT_S) -> st
         return ""
 
 
+def get_buffer_diff_text(
+    repo_root: str, relpath: str, new_text: str, timeout: int = GIT_TIMEOUT_S
+) -> str:
+    """Unified diff (-U0) of in-memory buffer text vs the HEAD blob.
+
+    Lets the gutter track unsaved edits: hunk `+` lines refer to buffer
+    lines. '' on any failure (e.g. path not in HEAD).
+    """
+    try:
+        if not repo_root or not os.path.isdir(repo_root) or not relpath:
+            return ""
+        if new_text is None:
+            return ""
+    except Exception:
+        return ""
+    try:
+        old = subprocess.run(
+            ["git", "show", f"HEAD:{relpath}"],
+            cwd=repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception:
+        return ""
+    if old.returncode != 0:
+        return ""
+    try:
+        new_bytes = new_text.encode("utf-8", "replace")
+    except Exception:
+        return ""
+    tmpdir = None
+    try:
+        tmpdir = tempfile.mkdtemp(prefix="xed-gutter-")
+        old_path = os.path.join(tmpdir, "old")
+        new_path = os.path.join(tmpdir, "new")
+        with open(old_path, "wb") as f:
+            f.write(old.stdout or b"")
+        with open(new_path, "wb") as f:
+            f.write(new_bytes)
+        proc = subprocess.run(
+            [
+                "git",
+                "diff",
+                "--no-index",
+                "--no-color",
+                "--no-ext-diff",
+                "-U0",
+                "--",
+                old_path,
+                new_path,
+            ],
+            cwd=repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception:
+        return ""
+    finally:
+        try:
+            if tmpdir is not None:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+    # --no-index exits 1 when files differ; anything else is failure.
+    if proc.returncode not in (0, 1):
+        return ""
+    try:
+        return (proc.stdout or b"").decode("utf-8", "surrogateescape")
+    except Exception:
+        return ""
+
+
 def parse_unified_diff(text: str) -> dict[str, list[int]]:
     """Parse `git diff -U0` output -> 0-based new-file lines per kind.
 
@@ -221,3 +299,73 @@ def untracked_marks(line_count: int) -> dict[str, list[int]]:
         "modified": [],
         "deleted": [],
     }
+
+
+def buffer_matches_head(
+    repo_root: str, relpath: str, text: str, timeout: int = GIT_TIMEOUT_S
+) -> bool:
+    """True when buffer text agrees with the HEAD blob, per git itself.
+
+    Compares `git rev-parse HEAD:<relpath>` against `git hash-object
+    --stdin --path=<relpath>` of the buffer bytes, so attributes, CRLF
+    filters, and git's own normalization apply — the gutter defers to
+    git's verdict instead of second-guessing it with raw bytes. Also
+    accepts text one trailing newline off: GtkSource keeps the final
+    newline implicit, so freshly loaded (or transient mid-load) buffer
+    text is routinely one `\\n` short of the blob without anything having
+    changed. False on any failure (callers fall back to the buffer diff).
+    """
+    try:
+        if not repo_root or not os.path.isdir(repo_root) or not relpath:
+            return False
+        if text is None:
+            return False
+        content = text.encode("utf-8", "replace")
+    except Exception:
+        return False
+    try:
+        blob = subprocess.run(
+            ["git", "rev-parse", f"HEAD:{relpath}"],
+            cwd=repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception:
+        return False
+    if blob.returncode != 0 or not blob.stdout:
+        return False
+    try:
+        want = blob.stdout.strip().decode("ascii", "replace")
+    except Exception:
+        return False
+    if not want:
+        return False
+    candidates = [content]
+    if content.endswith(b"\n"):
+        candidates.append(content[:-1])
+    else:
+        candidates.append(content + b"\n")
+    for variant in candidates:
+        try:
+            proc = subprocess.run(
+                ["git", "hash-object", "--stdin", f"--path={relpath}"],
+                input=variant,
+                cwd=repo_root,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout,
+                check=False,
+            )
+        except Exception:
+            return False
+        if proc.returncode != 0 or not proc.stdout:
+            return False
+        try:
+            got = proc.stdout.strip().decode("ascii", "replace")
+        except Exception:
+            return False
+        if got and got == want:
+            return True
+    return False

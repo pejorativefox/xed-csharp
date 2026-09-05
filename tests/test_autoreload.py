@@ -509,3 +509,13 @@ def test_sync_watches_without_gio_is_noop():
         assert plugin._monitors == {}
     finally:
         _restore_module(saved)
+
+
+def test_file_differs_ignores_implicit_trailing_newline():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "N.cs")
+        _write(path, "one\ntwo\n")
+        assert ar.file_differs(FakeDoc(text="one\ntwo"), path) is False
+        assert ar.file_differs(FakeDoc(text="one\ntwo\n"), path) is False
+        assert ar.file_differs(FakeDoc(text="one\nTWO"), path) is True
+        assert ar.file_differs(FakeDoc(text="x"), os.path.join(tmp, "Missing.cs")) is None

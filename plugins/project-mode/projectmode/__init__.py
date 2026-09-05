@@ -279,6 +279,11 @@ def resolve_startup_root(
 #: cycle). 1200ms coalesces bursts without feeling stale.
 GIT_REFRESH_DEBOUNCE_MS = 1200
 
+#: Debounce for working-tree file edits. Our own `git status` only ever
+#: touches `.git/index`, never working-tree files, so these events cannot
+#: self-trigger — no long gate needed, keep colors snappy while typing.
+GIT_DIR_DEBOUNCE_MS = 500
+
 #: Minimum time between two monitor-triggered `git status` runs. Manual
 #: refreshes (set_root) bypass this via force=True. Prevents a hot
 #: `.git/` (fetch/gc/index rewrite) from keeping the editor busy.
@@ -558,6 +563,7 @@ if Gtk is not None:
             self._git_generation = 0
             self._monitors: list = []
             self._refresh_timer = None
+            self._refresh_interval_s = GIT_REFRESH_MIN_INTERVAL_S
             self._tree_timer = None
             self._watched_dirs: set = set()
             self._git_root_cached: str | None = None
@@ -772,8 +778,24 @@ if Gtk is not None:
                 return False
             try:
                 self._freeze_tree(True)
+                # Color rows with the last known statuses right away: the
+                # post-build _apply_git_statuses below is skipped when the
+                # statuses are unchanged, which is exactly when a rebuild
+                # (content edit, same git status) would otherwise leave
+                # every row uncolored forever.
+                known = dict(self._git_statuses or {})
+                child_colors: list = []
                 for node in nodes:
-                    self._append_node(root_iter, node, {})
+                    child_colors.append(self._append_node(root_iter, node, known))
+                gs = _gitstatus if _gitstatus is not None else None
+                try:
+                    root_color = gs.aggregate_dir_color(child_colors) if gs is not None else None
+                except Exception:
+                    root_color = None
+                try:
+                    self.store.set_value(root_iter, self._col_fg, root_color)
+                except Exception:
+                    pass
             except Exception as e:
                 _debug(f"tree populate failed: {e!r}")
             finally:
@@ -837,18 +859,24 @@ if Gtk is not None:
             return color
 
         # -- git -------------------------------------------------------
-        def refresh_git_statuses(self, force: bool = False) -> None:
+        def refresh_git_statuses(self, force: bool = False, min_interval_s=None) -> None:
             """Re-query `git status` off the UI thread, then repaint colors.
 
             Monitor-triggered callers pass force=False and are rate-limited
-            (GIT_REFRESH_MIN_INTERVAL_S) so a hot `.git/` cannot keep the
-            editor busy; set_root passes force=True.
+            so a hot `.git/` cannot keep the editor busy; set_root passes
+            force=True. Working-tree edits (via _on_dir_changed) pass a
+            zero interval — our own `git status` never touches those files,
+            so they cannot self-trigger and stay snappy.
             """
             root = self._root_dir
             if not root or not os.path.isdir(root):
                 return
             if _gitstatus is None:
                 return
+            try:
+                interval = float(GIT_REFRESH_MIN_INTERVAL_S if min_interval_s is None else min_interval_s)
+            except Exception:
+                interval = GIT_REFRESH_MIN_INTERVAL_S
             if not force:
                 try:
                     now = time.monotonic()
@@ -858,17 +886,16 @@ if Gtk is not None:
                     last = float(getattr(self, "_last_git_refresh", 0.0) or 0.0)
                 except Exception:
                     last = 0.0
-                if now and last and (now - last) < GIT_REFRESH_MIN_INTERVAL_S:
+                if interval > 0 and now and last and (now - last) < interval:
                     try:
-                        remaining_ms = int(
-                            (GIT_REFRESH_MIN_INTERVAL_S - (now - last)) * 1000
-                        )
+                        remaining_ms = int((interval - (now - last)) * 1000)
                     except Exception:
                         remaining_ms = 0
                     if remaining_ms > 0:
                         self._arm_git_timer(
                             max(remaining_ms, GIT_REFRESH_DEBOUNCE_MS),
                             self._git_generation,
+                            interval,
                         )
                     return
             self._git_generation += 1
@@ -1100,10 +1127,16 @@ if Gtk is not None:
             except Exception as e:
                 _debug(f"dir monitors refresh failed: {e!r}")
 
-        def _arm_git_timer(self, delay_ms: int, generation: int) -> None:
+        def _arm_git_timer(self, delay_ms: int, generation: int, min_interval_s=None) -> None:
             if GLib is None:
                 return
             try:
+                try:
+                    self._refresh_interval_s = float(
+                        GIT_REFRESH_MIN_INTERVAL_S if min_interval_s is None else min_interval_s
+                    )
+                except Exception:
+                    self._refresh_interval_s = GIT_REFRESH_MIN_INTERVAL_S
                 if self._refresh_timer is not None:
                     try:
                         GLib.source_remove(self._refresh_timer)
@@ -1138,7 +1171,11 @@ if Gtk is not None:
             if generation != self._git_generation:
                 return False
             try:
-                self.refresh_git_statuses()
+                self.refresh_git_statuses(
+                    min_interval_s=getattr(
+                        self, "_refresh_interval_s", GIT_REFRESH_MIN_INTERVAL_S
+                    )
+                )
             except Exception as e:
                 _debug(f"git auto-refresh failed: {e!r}")
             return False
@@ -1177,8 +1214,10 @@ if Gtk is not None:
                     if should_refresh_for_git_event(
                         self._root_dir, file_path, other_path
                     ):
+                        # Working-tree edit: bypass the `.git/` storm gate
+                        # (our own status runs never touch these files).
                         self._arm_git_timer(
-                            GIT_REFRESH_DEBOUNCE_MS, self._git_generation
+                            GIT_DIR_DEBOUNCE_MS, self._git_generation, 0.0
                         )
                 except Exception:
                     pass
@@ -1211,6 +1250,10 @@ if Gtk is not None:
                         setattr(self, attr, None)
                     except Exception:
                         pass
+            try:
+                self._refresh_interval_s = GIT_REFRESH_MIN_INTERVAL_S
+            except Exception:
+                pass
             else:
                 try:
                     self._refresh_timer = None

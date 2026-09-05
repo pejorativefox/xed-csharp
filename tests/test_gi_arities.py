@@ -63,3 +63,40 @@ def test_navigation_arities():
     for cls, method, expected in cases:
         params = list(inspect.signature(getattr(cls, method)).parameters)
         assert params == expected, f"{method}: {params} != {expected}"
+
+
+def _gtksource():
+    try:
+        import gi
+
+        try:
+            gi.require_version("GtkSource", "4")
+        except Exception:
+            gi.require_version("GtkSource", "3.0")
+        from gi.repository import GtkSource
+
+        return GtkSource
+    except Exception as e:
+        print(f"SKIP gi arity marks ({str(e)[:100]})")
+        return None
+
+
+def test_mark_arities():
+    """remove_source_marks is (start, end, category).
+
+    Regression guard: the category-first order raised TypeError inside a
+    silent except, so gutter/diag/breakpoint marks could be added but
+    never removed.
+    """
+    GtkSource = _gtksource()
+    if GtkSource is None:
+        return
+    cases = [
+        (GtkSource.Buffer, "remove_source_marks",
+         ["self", "start", "end", "category"]),
+        (GtkSource.Buffer, "create_source_mark",
+         ["self", "name", "category", "where"]),
+    ]
+    for cls, method, expected in cases:
+        params = list(inspect.signature(getattr(cls, method)).parameters)
+        assert params == expected, f"{method}: {params} != {expected}"

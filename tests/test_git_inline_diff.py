@@ -167,3 +167,223 @@ def test_configure_marks_never_sets_line_background():
     source = inspect.getsource(gitinline.GitInlineDiffPlugin._configure_marks)
     assert "set_background" not in source
     assert "set_pixbuf" in source
+
+
+def test_buffer_diff_tracks_unsaved_edits():
+    if not _has_git():
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        _init_repo(tmp)
+        tracked = os.path.join(tmp, "f.txt")
+        with open(tracked, "w") as f:
+            f.write("one\ntwo\nthree\n")
+        subprocess.run(["git", "add", "f.txt"], cwd=tmp, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Disk is clean, but the in-memory buffer has unsaved edits.
+        assert diffparse.get_diff_text(tmp, tracked) == ""
+        hunks = diffparse.parse_unified_diff(
+            diffparse.get_buffer_diff_text(tmp, "f.txt", "one\nTWO\nthree\nfour\n")
+        )
+        assert 1 in hunks["modified"]
+        assert 3 in hunks["added"]
+        assert diffparse.get_buffer_diff_text(tmp, "missing.txt", "x\n") == ""
+        assert diffparse.get_buffer_diff_text(tmp, "f.txt", "one\ntwo\nthree\n") == ""
+
+
+class _FakeLocation:
+    def __init__(self, path):
+        self._path = path
+
+    def has_uri_scheme(self, scheme):
+        return scheme == "file"
+
+    def get_path(self):
+        return self._path
+
+
+class _FakeIter:
+    def __init__(self, line=0):
+        self._line = line
+
+    def get_line(self):
+        return self._line
+
+
+class _FakeDoc:
+    def __init__(self, path, modified=False, text=""):
+        self._location = _FakeLocation(path)
+        self._modified = modified
+        self._text = text
+        self.connected = []
+        self.disconnected = []
+
+    def get_location(self):
+        return self._location
+
+    def get_file(self):
+        raise AttributeError("no file")
+
+    def get_modified(self):
+        return self._modified
+
+    def get_line_count(self):
+        return len(self._text.splitlines())
+
+    def get_bounds(self):
+        return object(), object()
+
+    def get_text(self, _start, _end, _hidden):
+        return self._text
+
+    def connect(self, signal, _handler):
+        self.connected.append(signal)
+        return len(self.connected)
+
+    def disconnect(self, handler_id):
+        self.disconnected.append(handler_id)
+
+
+def _plugin():
+    plugin = gitinline.GitInlineDiffPlugin.__new__(gitinline.GitInlineDiffPlugin)
+    plugin._signal_ids = []
+    plugin._mark_views_configured = set()
+    plugin._generations = {}
+    plugin._tab_states = {}
+    plugin._debounce_timer = None
+    plugin._pending_paths = set()
+    plugin._doc_handlers = {}
+    return plugin
+
+
+def test_doc_watch_connects_once_and_schedules_on_change():
+    doc = _FakeDoc("/tmp/F.cs")
+    plugin = _plugin()
+    scheduled = []
+    plugin._schedule_paths = lambda paths: scheduled.append(list(paths))  # type: ignore[method-assign]
+    plugin._watch_doc(doc)
+    plugin._watch_doc(doc)
+    assert doc.connected == ["changed"]
+    plugin._on_doc_changed(doc)
+    assert scheduled == [["/tmp/F.cs"]]
+
+
+def test_doc_unwatch_disconnects():
+    doc = _FakeDoc("/tmp/F.cs")
+    plugin = _plugin()
+    plugin._watch_doc(doc)
+    plugin._unwatch_doc(doc)
+    assert doc.disconnected == [1]
+    assert plugin._doc_handlers == {}
+
+
+def test_snapshot_captures_buffer_text_when_dirty():
+    doc = _FakeDoc("/tmp/F.cs", modified=True, text="a\nb\n")
+    plugin = _plugin()
+    plugin._find_doc = lambda path: doc if path == "/tmp/F.cs" else None  # type: ignore[method-assign]
+    snapshot = plugin._snapshot_doc("/tmp/F.cs")
+    assert snapshot["modified"] is True
+    assert snapshot["text"] == "a\nb\n"
+    assert snapshot["line_count"] == 2
+    clean = _FakeDoc("/tmp/G.cs", modified=False, text="a\n")
+    plugin._find_doc = lambda path: clean if path == "/tmp/G.cs" else None  # type: ignore[method-assign]
+    snapshot = plugin._snapshot_doc("/tmp/G.cs")
+    assert snapshot["modified"] is False
+    assert snapshot["text"] is None
+
+
+def test_buffer_matches_head_defers_to_git():
+    if not _has_git():
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        _init_repo(tmp)
+        with open(os.path.join(tmp, "f.txt"), "w") as f:
+            f.write("one\ntwo\n")
+        subprocess.run(["git", "add", "f.txt"], cwd=tmp, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert diffparse.buffer_matches_head(tmp, "f.txt", "one\ntwo") is True
+        assert diffparse.buffer_matches_head(tmp, "f.txt", "one\ntwo\n") is True
+        assert diffparse.buffer_matches_head(tmp, "f.txt", "one\nTWO") is False
+        assert diffparse.buffer_matches_head(tmp, "missing.txt", "x\n") is False
+        assert diffparse.buffer_matches_head(tmp, "f.txt", None) is False
+
+
+def test_query_thread_prefers_disk_when_buffer_matches_it():
+    if not _has_git():
+        return
+    with tempfile.TemporaryDirectory() as tmp:
+        _init_repo(tmp)
+        tracked = os.path.join(tmp, "f.txt")
+        with open(tracked, "w") as f:
+            f.write("one\n")
+        subprocess.run(["git", "add", "f.txt"], cwd=tmp, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=tmp, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        plugin = gitinline.GitInlineDiffPlugin()
+        results = []
+        plugin._apply_result = lambda p, r, g: results.append(r) or False  # type: ignore[method-assign]
+
+        def run_query(snapshot):
+            results.clear()
+            plugin._query_thread(tracked, 0, snapshot)
+            if gitinline.GLib is not None:
+                ctx = gitinline.GLib.MainContext.default()
+                for _ in range(200):
+                    if not ctx.pending():
+                        break
+                    ctx.iteration(False)
+
+        # Transient loader state: dirty flag, text one newline short, disk clean.
+        run_query({"modified": True, "line_count": 1, "text": "one"})
+        assert results == [{"added": [], "modified": [], "deleted": []}]
+        # Genuine unsaved edit still uses the buffer diff.
+        with open(tracked, "w") as f:
+            f.write("one\nTWO\n")
+        run_query({"modified": True, "line_count": 1, "text": "uno\n"})
+        assert results[-1]["modified"] == [0]
+
+
+def _display():
+    try:
+        import gi
+
+        gi.require_version("Gtk", "3.0")
+        from gi.repository import Gtk
+
+        result = Gtk.init_check()
+        ok = result[0] if isinstance(result, tuple) else bool(result)
+        if not ok:
+            return None
+        return Gtk
+    except Exception as e:
+        print(f"SKIP mark-clear test (no display: {e})")
+        return None
+
+
+def test_apply_result_removes_stale_marks():
+    """Empty refresh must clear previously applied marks.
+
+    Needs a display; skipped headless. Regression: remove_source_marks
+    was called category-first (TypeError, silently swallowed), so marks
+    stuck forever — e.g. the ghost mark after an external revert.
+    """
+    Gtk = _display()
+    if Gtk is None or gitinline.GtkSource is None:
+        return
+    buf = gitinline.GtkSource.Buffer.new(None)
+    buf.set_text("a\nb\nc\n", -1)
+    buf.create_source_mark(
+        None, diffparse.CATEGORY_ADDED, buf.get_iter_at_line(0))
+    assert len(buf.get_source_marks_at_line(0, None)) == 1
+    plugin = gitinline.GitInlineDiffPlugin()
+    plugin._generations = {"/tmp/x.cs": 0}
+    plugin._find_doc = lambda path: buf  # type: ignore[method-assign]
+    plugin._configure_marks = lambda doc: None  # type: ignore[method-assign]
+    plugin._apply_result("/tmp/x.cs", {"added": [], "modified": [], "deleted": []}, 0)
+    assert buf.get_source_marks_at_line(0, None) == []
+    plugin._apply_result("/tmp/x.cs", {"added": [1], "modified": [], "deleted": []}, 0)
+    assert len(buf.get_source_marks_at_line(1, None)) == 1

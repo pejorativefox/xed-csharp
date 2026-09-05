@@ -238,6 +238,10 @@ def file_differs(doc, path: str) -> bool | None:
     None means "cannot tell" (unreadable file or buffer); callers treat that
     as "do not reload", except oversized files which compare as differing so
     large clean buffers still reload.
+
+    Tolerates one trailing-newline difference: GtkSource keeps the final
+    newline implicit, so a freshly loaded buffer always compares one `\n`
+    short of the on-disk bytes.
     """
     try:
         if os.path.getsize(path) > _COMPARE_CAP_BYTES:
@@ -250,7 +254,9 @@ def file_differs(doc, path: str) -> bool | None:
     content = buffer_bytes(doc)
     if content is None:
         return None
-    return data != content
+    if data == content or data == content + b"\n":
+        return False
+    return True
 
 
 def _watched_events() -> set:
