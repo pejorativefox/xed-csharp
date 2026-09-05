@@ -1,182 +1,118 @@
-# xed-csharp — C# DevKit-like plugin for xed (Linux Mint)
+# xed-csharp — turn xed into a lightweight code editor
 
-Single multi-feature Python plugin (`Loader=python3`):
+A set of plugins that gives Linux Mint's xed editor some modern comforts:
+a project file browser with git colors, quick file opening, C# support
+with completions and debugging, git change markers in the editor gutter,
+a built-in terminal, and handy shortcuts for hiding panes.
 
-- **Solution Explorer** (side panel): `.sln/.slnx` discovery via upward search,
-  projects via `dotnet sln list` with glob fallback, `.cs` quick navigation,
-  right-click Build / Run / Test / Debug per project.
-- **Test Explorer** (side panel): per-project discovery via
-  `dotnet test --list-tests`, Run All / per-test runs with `--filter`, outcome
-  glyphs (✓/✗/○) parsed from console output (xUnit/NUnit/MSTest tolerant).
-- **Build output + Problems** (bottom panel): streaming `dotnet` output plus a
-  clickable Problems list (diagnostics, definitions, references).
-- **Roslyn intelligence**: stdio LSP client talking to `roslyn-language-server`
-  (`~/.dotnet/tools/roslyn-language-server`, v5.9.0 verified). Standard
-  `initialize` → `initialized` + Roslyn `solution/open` quirk,
-  `didOpen`/`didChange` (debounced per view) / `didSave` / `didClose`.
-  - Completion via the editor's own completion window (same framework as
-    the bundled Word Completion plugin: interactive on typing, `Ctrl+Space`
-    on demand, `Tab`/`Enter` accepts). A custom popup remains as fallback
-    on builds without GtkSource.
-  - Hover tooltips, Go to Definition (`F12`), Find References (`Shift+F12`),
-    Format Document (`Shift+Alt+F`, optional format-on-save), Quick Fix menu
-    (`Alt+Enter`, incl. `codeAction/resolve` + `workspaceEdit` support).
-  - Diagnostics rendered as editor underline tags + gutter marks, mirrored to
-    Problems + status line.
-- **Debugging** (bottom panel): F9 toggles persistent breakpoints (gutter marks),
-  F5 builds the startup project and launches it under `netcoredbg` via a minimal
-  DAP client (same Content-Length framing as LSP). Call stack, scopes/variables,
-  Continue / Step Over / Into / Out / Stop. Missing `netcoredbg` degrades to an
-  install hint instead of silent failure.
+You don't need to know any programming to use these — install, enable,
+and edit.
 
-Additional standalone plugins:
+## What you get
 
-- **project-mode** (side panel): language-agnostic folder browser opened with
-  `Ctrl+Shift+O`; selecting a folder renders its file tree on the left and row
-  activation opens files in xed. Also loads a folder at startup: a fresh
-  `cd proj && xed` auto-loads the cwd when it looks like a project, and
-  `xed-code [folder]` opens any folder in a new window (`code .` equivalent;
-  `$HOME`/`/` never auto-load, marker-less folders prompt instead of loading).
-- **fuzzy-finder**: `Ctrl+P` quick-open dialog listing every file under the
-  folder loaded in project-mode (gitignore-aware), with fzy-style fuzzy
-  ranking (word-boundary/camelCase bonuses, multi-term AND, smart case).
-  Soft-depends on project-mode at runtime: with no folder loaded it prompts
-  to pick one first.
-- **feature-toggle**: hides xed's built-in Documents list and closes the lone
-  untouched "Unsaved Document 1" starter tab on startup (both enabled by
-  default, configurable via INI).
+**Project folder browser** (project-mode)
+- Open any folder and browse its files in the side panel.
+- Files are colored by git state, like in VS Code: green means new,
+  tan means changed, red means deleted.
+- Open a folder with `Ctrl+Shift+O`, or straight from the terminal:
+  `xed-code [folder]` works like `code .` and opens the folder in a
+  new xed window.
 
-## Shortcuts (in C# files)
+**Quick file opener** (fuzzy-finder)
+- Press `Ctrl+P`, start typing any part of a file name, and jump to it.
+  It understands capitals (`mc` finds `MyClass.cs`) and multiple words.
 
-| Keys | Action |
-| ---- | ------ |
-| `Ctrl+Space`, `.`, `(` | Completion |
-| `F12` / `Shift+F12` | Go to Definition / Find References |
-| `Alt+Enter` | Quick Fix… |
-| `Shift+Alt+F` | Format Document |
-| `F9` | Toggle breakpoint |
-| `F5` | Debug startup project |
+**Git change markers** (git-inline-diff)
+- The left edge of the editor shows what changed compared to git:
+  green for added lines, tan for changed lines, red where lines were
+  deleted. Untracked new files show all green. Marks refresh every
+  time you save.
 
-## Global shortcuts (Panel Hider plugin)
+**C# support** (C# DevKit for xed)
+- Solution explorer, build / run / test per project, a test list with
+  pass/fail marks, clickable error list, code completions, hover help,
+  go-to-definition (`F12`), find references (`Shift+F12`), formatting
+  (`Shift+Alt+F`), quick fixes (`Alt+Enter`), and debugging with
+  breakpoints (`F9`) and launch (`F5`).
 
-| Keys | Action |
-| ---- | ------ |
-| `Ctrl+B` | Hide side + bottom panes |
-| `Ctrl+J` | Toggle bottom pane |
-| `Ctrl+E` | Toggle side pane |
+**Built-in terminal** (tabbed-terminal)
+- A terminal in xed's bottom panel, with tabs.
 
-## Global shortcuts (project-mode plugin)
+**Less clutter** (panel-hider + feature-toggle)
+- `Ctrl+B` hides side and bottom panes for distraction-free editing,
+  `Ctrl+J` / `Ctrl+E` toggle bottom / side pane alone.
+- Hides the built-in Documents list and closes the empty
+  "Unsaved Document 1" tab xed starts with (both can be switched back
+  off in the settings file if you miss them).
 
-| Keys | Action |
-| ---- | ------ |
-| `Ctrl+Shift+O` | Choose folder root for file tree |
-
-## Global shortcuts (fuzzy-finder plugin, needs project-mode root)
-
-| Keys | Action |
-| ---- | ------ |
-| `Ctrl+P` | Fuzzy-open any file under the loaded project folder |
-
-## Layout
-
-```
-plugins/
-  panel-hider/
-    panel-hider.plugin
-    panelhider/
-      __init__.py       # global pane hide/toggle shortcuts
-  feature-toggle/
-    feature-toggle.plugin
-    featuretoggle/
-      __init__.py       # hide Documents panel + close untouched starter tab
-  project-mode/
-    project-mode.plugin
-    projectmode/
-      __init__.py       # folder browser side panel + Ctrl+Shift+O
-  fuzzy-finder/
-    fuzzy-finder.plugin
-    fuzzyfinder/
-      __init__.py       # Ctrl+P quick-open dialog + project-mode root lookup
-      matcher.py        # subsequence fuzzy matcher (headless-testable)
-      files.py          # gitignore-aware recursive file index (headless-testable)
-  xedcsharp/
-    xedcsharp.plugin    # Loader=python3, Module=xedcsharp, IAge=3
-    xedcsharp/
-      __init__.py       # Xed.WindowActivatable entry + wiring
-      views.py          # per-view tracker (sync, keys, menu, hover)
-      gscompletion.py   # Roslyn GtkSource.CompletionProvider (preferred)
-      completion.py     # completion popup (pure Gtk3, fallback only)
-      explorer.py       # solution explorer (side)
-      testpanel.py      # test explorer (side)
-      output.py         # output + problems (bottom)
-      debugpanel.py     # breakpoints/stack/variables (bottom)
-      solution.py       # sln/csproj discovery (no MSBuild parser)
-      dotnet_cli.py     # sync + streaming runners (headless-testable)
-      lsp_transport.py  # Content-Length JSON-RPC over stdio
-      roslyn.py         # Roslyn lifecycle + handshake
-      dap.py            # minimal DAP client for netcoredbg
-      breakpoints.py    # persistent breakpoint store
-      intelligence.py   # positions, completion/hover/location/edit helpers
-      testing.py / debugging.py
-      settings.py       # INI store, no GSettings schema
-tests/                  # headless unit tests (no GTK, no pytest needed)
-```
+**Small helpers**
+- `xed-open 'file.cs:line:col'` opens a file at an exact position —
+  handy for terminal links.
+- Two extra dark-friendly color schemes are installed automatically.
 
 ## Install
 
+You need: **xed 3.x**, **python3-gi**, and for C# features the
+**dotnet SDK** plus the Roslyn language server:
+
+```bash
+dotnet tool install --global roslyn-language-server
+```
+
+Then install everything:
+
 ```bash
 ./install.sh
-# restart xed, enable the plugins you want in Preferences -> Plugins
-XED_PLUGIN_DEBUG=1 xed   # debug logs to stderr
 ```
 
-Requires: `xed 3.x`, `python3-gi`, `dotnet` SDK 9/10,
-`dotnet tool install --global roslyn-language-server`.
-Optional: `netcoredbg`, `ctags`, `ripgrep`.
+Now **fully quit xed** (File → Quit all windows — important, see below),
+start it again, and enable what you want under
+Edit → Preferences → Plugins:
+C# DevKit for xed, project-mode, fuzzy-finder, feature-toggle,
+panel-hider, tabbed-terminal, git-inline-diff.
 
-## Verify
+## Everyday shortcuts
+
+| Keys | What it does |
+| ---- | ------------ |
+| `Ctrl+Shift+O` | Open a project folder |
+| `Ctrl+P` | Quickly open any file in the project |
+| `Ctrl+B` | Hide/show all panes (focus mode) |
+| `Ctrl+J` / `Ctrl+E` | Toggle bottom / side pane |
+| `Ctrl+Space` | Code completions (C#) |
+| `F12` / `Shift+F12` | Go to definition / find references (C#) |
+| `Alt+Enter` | Quick fix for the error at the cursor (C#) |
+| `Shift+Alt+F` | Format the file (C#) |
+| `F9` | Toggle breakpoint (C#) |
+| `F5` | Build and debug (C#) |
+
+## Something not working?
+
+Run the self-check first:
 
 ```bash
-python3 -m pytest tests/ -q
-# or without pytest: python3 -c "<loader>" (see CI)
+python3 doctor.py
 ```
 
-## Troubleshooting (no signs of life?)
+The usual culprits:
 
-```bash
-python3 doctor.py   # checks install, GI plumbing, toolchain, xed state
-```
+1. **xed was still running.** xed stays open in the background, so a new
+   `xed` command just talks to the old one — new plugins and settings
+   never load. Always use File → Quit all windows first, then start xed
+   fresh.
+2. **Panes are hidden.** New panels live in the side/bottom panes; turn
+   them on via View → Side Pane / Bottom Pane.
+3. **A plugin isn't enabled.** Check Edit → Preferences → Plugins.
+4. **C# completions missing.** Make sure the dotnet SDK and
+   `roslyn-language-server` are installed (see above). The C# Output
+   panel at the bottom shows what the language server is doing.
 
-Known causes, in order of likelihood:
+If you report a problem, run `XED_PLUGIN_DEBUG=1 xed` from a terminal
+(after fully quitting first) and include any lines starting with
+`[project-mode]`, `[git-inline-diff]`, or `[xed-csharp]`.
 
-1. **Stale xed process.** `xed` is a single-instance GApplication: running
-   `XED_PLUGIN_DEBUG=1 xed` while xed is already open just pings the old
-   process — the env var never arrives and stderr goes nowhere useful.
-   Fully quit first (File → Quit all windows), then `XED_PLUGIN_DEBUG=1 xed`.
-2. **Side/bottom panes hidden.** New panels land in xed's side/bottom panes;
-   show them via View → Side Pane / Bottom Pane.
-3. **Private typelib paths.** Some builds install `Xed-1.0.typelib` and
-   `libxed.so` outside the standard search paths, which silently breaks
-   *every* Python plugin (`ValueError: Namespace Xed not available`). The
-   plugin self-registers xed's private dirs at import; if import still fails,
-   the full traceback now goes to stderr instead of failing silently.
-4. **Proof of life.** With `XED_PLUGIN_DEBUG=1`, the plugin appends to
-   `/tmp/xedcsharp-<uid>.log` on import and activation — check it even when
-   stderr is swallowed (desktop-menu launches log to the journal).
-5. **Roslyn server deaths.** The C# Output panel now shows the exit code plus
-   the server's own error lines, and the full stderr is kept at
-   `~/.cache/xed/xed-csharp/roslyn-logs/roslyn-stderr.log`. After a crash,
-   C# Solution → Refresh restarts the server.
+## For developers
 
-## Design notes
-
-- xed 3.8 has no LSP client, so the plugin owns background reader threads and
-  marshals callbacks via `GLib.idle_add` (see `RoslynManager(ui_dispatch=…)`
-  and `DapSession`).
-- Completion registers a `GtkSource.CompletionProvider` on every view,
-  exactly like the bundled Word Completion plugin does, so the editor's
-  own completion window handles focus, filtering and commit (a custom
-  pure-Gtk3 popup in `completion.py` remains as fallback for builds
-  without the GtkSource typelib).
-- Settings live in `~/.config/xed/plugins/xed-csharp/settings.ini`;
-  breakpoints in `breakpoints.ini` alongside.
+The test suite runs without pytest or a display — see `AGENTS.md` for
+the exact command, plus contributor notes (plugin reinstall step,
+diagnostics, and conventions).
