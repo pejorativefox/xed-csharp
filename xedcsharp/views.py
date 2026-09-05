@@ -309,11 +309,15 @@ class ViewTracker(GObject.Object):
                 self.emit("goto-definition", path, line, char)
             return True
         if ctrl and not shift and not alt and keyname.lower() == "space":
+            if self.framework_completion:
+                # GtkSource owns the popup: its USER_REQUESTED activation
+                # calls our do_match/do_populate directly. Emitting a
+                # prefetch here would double-request; let the key reach
+                # the framework binding so the popup is forced open even
+                # with an empty prefix (VSCode Ctrl+Space).
+                return False
             self.emit("completion-request", path, line, char, "invoke")
-            # With GtkSource framework completion the editor shows the
-            # popup natively (like wordcompletion); our emission above only
-            # warms the cache, so the key must reach the framework binding.
-            return not self.framework_completion
+            return True
         if keyname == "F9" and plain and not shift:
             self.emit("toggle-breakpoint", path, cursor_line0(doc))
             return True
@@ -330,6 +334,12 @@ class ViewTracker(GObject.Object):
 
     def _on_key_release(self, _view, event, doc) -> bool:
         if not is_csharp_doc(doc):
+            return False
+        if self.framework_completion:
+            # GtkSource interactive activation drives populate/filtering
+            # itself (like wordcompletion + VSCode). Manual emissions here
+            # only caused duplicate requests and stale (path,line) cache
+            # warming — stay out of the way.
             return False
         try:
             mods = event.state & Gtk.accelerator_get_default_mod_mask()

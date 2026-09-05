@@ -85,7 +85,167 @@ def test_import_without_gtksource_typelib():
             sys.modules["xedcsharp.gscompletion"] = saved
 
 
-def test_word_start_offset():
+def test_trigger_context():
+    assert gs_mod.trigger_context("a", 1, False) == (1, None)
+    assert gs_mod.trigger_context("Console.", 8, False) == (2, ".")
+    assert gs_mod.trigger_context("f(", 2, False) == (2, "(")
+    assert gs_mod.trigger_context("x", 1, True) == (1, None)
+    # VSCode re-query while extending an incomplete list.
+    assert gs_mod.trigger_context("x", 1, False, True) == (3, None)
+
+
+def test_cache_valid_reuse_vs_requery():
+    import time
+
+    items = [intel.CompletionItem(label="WriteLine")]
+    entry = gs_mod._CacheEntry(
+        items=list(items), is_incomplete=False, path="/tmp/A.cs",
+        line=0, char=11, offset=11, prefix="Wri", time=time.monotonic(),
+    )
+    # Extending the same prefix on the same line reuses (local filter).
+    assert gs_mod.cache_valid(entry, "/tmp/A.cs", 0, "Writ") is True
+    # Trigger character resets the prefix -> member list differs.
+    assert gs_mod.cache_valid(entry, "/tmp/A.cs", 0, "") is False
+    assert gs_mod.cache_valid(entry, "/tmp/A.cs", 1, "Wri") is False
+    assert gs_mod.cache_valid(entry, "/tmp/B.cs", 0, "Wri") is False
+    incomplete = gs_mod._CacheEntry(
+        items=list(items), is_incomplete=True, path="/tmp/A.cs",
+        line=0, char=11, offset=11, prefix="Wri", time=time.monotonic(),
+    )
+    assert gs_mod.cache_valid(incomplete, "/tmp/A.cs", 0, "Writ") is False
+
+
+def test_populate_async_never_blocks():
+    """VSCode parity: populate returns cache/empty immediately (no 0.35s wait)."""
+    if _GUI is None:
+        return
+    import time
+
+    Gtk, GtkSource = _GUI
+    message = {"result": {"items": [
+        {"label": "WriteLine", "detail": "void"},
+        {"label": "Write", "detail": "void"},
+    ]}}
+
+    class FakeCtx:
+        def __init__(self, it, user=False):
+            self._it = it
+            self._user = user
+            self.calls = []
+
+        def get_iter(self):
+            return (True, self._it)
+
+        def get_activation(self):
+            return (
+                GtkSource.CompletionActivation.USER_REQUESTED
+                if self._user
+                else GtkSource.CompletionActivation.INTERACTIVE
+            )
+
+        def add_proposals(self, _provider, proposals, finished):
+            self.calls.append((list(proposals), finished))
+
+    contexts = []
+
+    def send_request(method, params, callback):
+        contexts.append(params["context"])
+        callback(dict(message))
+        return 5
+
+    provider = _provider(send_request=send_request)
+    buf = GtkSource.Buffer()
+    buf.set_text("Console.Wri")
+    ctx = FakeCtx(buf.get_end_iter(), user=True)
+    started = time.monotonic()
+    provider.do_populate(ctx)
+    assert time.monotonic() - started < 0.2, "populate blocked the main loop"
+    # Empty unfinished first, async answer completes the same context.
+    assert ctx.calls[0] == ([], False)
+    assert len(ctx.calls) == 2 and ctx.calls[1][1] is True
+    assert [p.get_label() for p in ctx.calls[1][0]] == ["WriteLine", "Write"]  # type: ignore[attr-defined]
+    assert contexts[0] == {"triggerKind": 1, "triggerCharacter": None}
+    # Same prefix on the same line: cache hit, no new request.
+    before = len(contexts)
+    ctx2 = FakeCtx(buf.get_end_iter())
+    provider.do_populate(ctx2)
+    assert len(contexts) == before
+    assert ctx2.calls[0][1] is True and len(ctx2.calls) == 1
+
+
+def test_populate_trigger_character_context():
+    if _GUI is None:
+        return
+    Gtk, GtkSource = _GUI
+
+    class FakeCtx:
+        def __init__(self, it):
+            self._it = it
+            self.calls = []
+
+        def get_iter(self):
+            return (True, self._it)
+
+        def get_activation(self):
+            return GtkSource.CompletionActivation.INTERACTIVE
+
+        def add_proposals(self, _provider, proposals, finished):
+            self.calls.append((list(proposals), finished))
+
+    contexts = []
+
+    def send_request(method, params, callback):
+        contexts.append(params["context"])
+        callback({"result": {"items": []}})
+        return 1
+
+    provider = _provider(send_request=send_request)
+    buf = GtkSource.Buffer()
+    buf.set_text("Console.")
+    provider.do_populate(FakeCtx(buf.get_end_iter()))
+    assert contexts[0] == {"triggerKind": 2, "triggerCharacter": "."}, contexts
+
+
+def test_proposal_filter_text_and_icon():
+    if _GUI is None:
+        return
+    Gtk, GtkSource = _GUI
+    provider = _provider()
+    text = "Console.Wri"
+    message = {"result": {"items": [
+        {"label": "WriteLine", "detail": "void M()", "filterText": "WriteLine",
+         "kind": 2,
+         "textEdit": {
+             "range": {"start": {"line": 0, "character": 8},
+                       "end": {"line": 0, "character": 11}},
+             "newText": "WriteLine"}},
+    ]}}
+    items = intel.parse_completion(message, text, len(text))
+    proposals = provider._proposals_for(items)
+    assert proposals[0].get_text() == "WriteLine"  # type: ignore[attr-defined]  # framework filters on this
+    assert "void M()" in proposals[0].get_info()  # type: ignore[attr-defined]
+    assert proposals[0].get_property("icon-name") == "completion-method"  # type: ignore[attr-defined]
+
+
+def test_match_permissive_while_typing():
+    """VSCode shows completion on the first char; the old char-probe gate did not."""
+    if _GUI is None:
+        return
+    Gtk, GtkSource = _GUI
+    win = Gtk.Window()
+    buf = GtkSource.Buffer()
+    view = GtkSource.View.new_with_buffer(buf)
+    win.add(view)
+    win.show_all()
+    while Gtk.events_pending():
+        Gtk.main_iteration()
+    try:
+        buf.set_text("C")
+        provider = _provider(path="/tmp/A.cs")
+        ctx = view.get_completion().create_context(buf.get_end_iter())
+        assert provider.do_match(ctx) is True
+    finally:
+        win.destroy()
     assert gs_mod.word_start_offset("Console.Wri", 11) == 8
     assert gs_mod.word_start_offset("Console.", 8) == 8
     assert gs_mod.word_start_offset("", 0) == 0

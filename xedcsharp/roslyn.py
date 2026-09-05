@@ -208,7 +208,22 @@ class RoslynManager:
                 "textDocument": {
                     "synchronization": {"didSave": True},
                     "publishDiagnostics": {"relatedInformation": True},
-                    "completion": {"completionItem": {"snippetSupport": False}},
+                    "completion": {
+                        "completionItem": {
+                            "snippetSupport": True,
+                            "commitCharactersSupport": True,
+                            "documentationFormat": ["markdown", "plaintext"],
+                            "resolveSupport": {
+                                "properties": [
+                                    "documentation",
+                                    "detail",
+                                    "additionalTextEdits",
+                                ]
+                            },
+                        },
+                        "completionItemKind": {"valueSet": list(range(1, 26))},
+                        "contextSupport": True,
+                    },
                     "hover": {"contentFormat": ["markdown", "plaintext"]},
                     "definition": {},
                     "references": {},

@@ -774,6 +774,7 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
                     is_ready=self._roslyn_ready,
                     resolve_path=self._gs_resolve_path,
                     send_request=self._gs_send_request,
+                    flush_doc=self._flush_completion_doc,
                 )
             if self.tracker is not None:
                 self.tracker.framework_completion = True
@@ -821,35 +822,47 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             debug(f"framework completion request failed: {e!r}")
             return None
 
-    def _prefetch_completion(self, path: str, line: int, char: int, trigger: str) -> None:
-        """Warm the framework provider cache; shows no UI of its own."""
-        if not self._use_framework():
-            return
+    def _flush_completion_doc(self, path: str) -> None:
+        """Synchronously push the buffer to Roslyn before a completion query.
+
+        didChange is normally debounced 400ms; VSCode sends the latest
+        text before completing. Best-effort: missing doc/server is fine.
+        """
         try:
+            if getattr(self.roslyn, "state", "") != "ready":
+                return
             doc = self._find_doc(path)
-            text = buffer_text(doc) if doc is not None else ""
-            offset = intel.position_to_offset(text, line, char)
-            params = intel.position_params(path, line, char)
-            if trigger.startswith("auto:") or trigger == "invoke":
-                trigger_kind, trigger_char = 1, None
+            if doc is None:
+                return
+            text = buffer_text(doc)
+            version = self._doc_versions.get(path, 0) + 1
+            self._doc_versions[path] = version
+            try:
+                known = any(
+                    path in uri or uri.endswith(os.path.basename(path))
+                    for uri in self.roslyn.open_docs
+                )
+            except Exception:
+                known = False
+            if known:
+                self.roslyn.did_change(path, version, text)
             else:
-                trigger_kind, trigger_char = 2, trigger if len(trigger) == 1 else None
-            params["context"] = {
-                "triggerKind": trigger_kind,
-                "triggerCharacter": trigger_char,
-            }
-            key = (path, line)
-
-            def _cb(message: dict, _key=key, _text=text, _offset=offset) -> None:
-                try:
-                    assert self._gs_provider is not None
-                    self._gs_provider.note_response(_key, message, _text, _offset)
-                except Exception:
-                    pass
-
-            self.roslyn.request("textDocument/completion", params, _cb)
+                self.roslyn.did_open(path, "csharp", version, text)
         except Exception as e:
-            debug(f"completion prefetch failed: {e!r}")
+            debug(f"completion flush failed: {e!r}")
+
+    def _show_framework_completion(self) -> bool:
+        """Force the GtkSource popup open (explicit invoke, VSCode Ctrl+Space)."""
+        try:
+            if not self._use_framework():
+                return False
+            view = self._safe(lambda: self.window.get_active_view())
+            if view is None:
+                return False
+            return bool(gs_mod.show_completion(view, self._gs_provider))
+        except Exception as e:
+            debug(f"completion show failed: {e!r}")
+            return False
 
     def _completion_visible(self) -> bool:
         try:
@@ -861,9 +874,12 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         if not self._roslyn_ready():
             return
         if self._use_framework():
-            # The editor's own completion window handles display, focus,
-            # filtering and commit; our triggers only warm its cache.
-            self._prefetch_completion(path, line, char, trigger)
+            # GtkSource interactive activation already populated on every
+            # keystroke; the tracker no longer emits auto triggers in this
+            # mode. Only explicit invokes arrive here (fallback key
+            # bindings / menus): force the popup open at the cursor.
+            if trigger == "invoke":
+                self._show_framework_completion()
             return
         doc = self._find_doc(path)
         if doc is None:

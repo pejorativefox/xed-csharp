@@ -65,7 +65,70 @@ def test_parse_completion_empty():
     assert intel.parse_completion({"result": None}, "x", 1) == []
 
 
-def test_trigger_chars():
+def test_parse_completion_vscode_fields():
+    """filterText/sortText/insert+replace/snippet/commit/preselect/isIncomplete."""
+    from xedcsharp import gscompletion as gs_mod
+
+    text = "Console.Wri"
+    offset = len(text)
+    response = {
+        "result": {
+            "isIncomplete": True,
+            "items": [
+                {"label": "WriteLine", "detail": "void", "filterText": "WriteLine",
+                 "sortText": "001", "kind": 2, "preselect": True,
+                 "textEdit": {
+                     "insert": {"range": {"start": {"line": 0, "character": 8},
+                                          "end": {"line": 0, "character": 11}}},
+                     "replace": {"range": {"start": {"line": 0, "character": 8},
+                                           "end": {"line": 0, "character": 11}}},
+                     "newText": "WriteLine"},
+                 "additionalTextEdits": [
+                     {"range": {"start": {"line": 0, "character": 0},
+                                "end": {"line": 0, "character": 0}},
+                      "newText": "// extra"}],
+                 "commitCharacters": [".", "("]},
+                {"label": "ctor", "insertTextFormat": 2,
+                 "insertText": "ctor$0", "sortText": "999", "kind": 15},
+                {"label": "b", "sortText": "002"},
+                {"label": "a", "sortText": "000"},
+            ],
+        }
+    }
+    items = intel.parse_completion(response, text, offset)
+    # VSCode sorts by sortText, keeping server order otherwise.
+    assert [i.label for i in items] == ["a", "WriteLine", "b", "ctor"]
+    wl = items[1]
+    assert wl.filter_text == "WriteLine"
+    assert (wl.insert_start, wl.insert_end) == (8, 11)
+    assert (wl.replace_start, wl.replace_end) == (8, 11)
+    assert wl.preselect is True and wl.kind == 2
+    assert wl.additional_edits != [] and wl.commit_chars == [".", "("]
+    assert gs_mod.cache_valid is not None  # provider owns reuse rules
+    assert items[3].insert_text == "ctor"  # snippet tabstop stripped
+    assert intel.completion_is_incomplete(response) is True
+    assert intel.completion_is_incomplete({"result": {"items": []}}) is False
+    assert intel.completion_filter_text(wl) == "WriteLine"
+    assert intel.completion_icon_name(2) == "completion-method"
+    assert intel.completion_icon_name(999) == ""
+
+
+def test_snippet_to_plain():
+    assert intel.snippet_to_plain("ctor$0") == "ctor"
+    assert intel.snippet_to_plain("for (${1:int i} = 0; $0)") == "for (int i = 0; )"
+    assert intel.snippet_to_plain("plain") == "plain"
+
+
+def test_positions_use_utf16_units():
+    text = "a\U0001F600b"  # 'a' + astral emoji (2 UTF-16 units) + 'b'
+    assert intel.offset_to_position(text, 0) == (0, 0)
+    assert intel.offset_to_position(text, 1) == (0, 1)
+    assert intel.offset_to_position(text, 2) == (0, 3)
+    assert intel.offset_to_position(text, 3) == (0, 4)
+    assert intel.position_to_offset(text, 0, 3) == 2
+    assert intel.position_to_offset(text, 0, 4) == 3
+    # ASCII behaviour unchanged.
+    assert intel.offset_to_position("ab\ncd", 3) == (1, 0)
     assert intel.should_trigger_completion(".")
     assert intel.should_trigger_completion("(")
     assert not intel.should_trigger_completion("a")

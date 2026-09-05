@@ -88,24 +88,61 @@ def xy_of(result) -> Tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
-# Positions / offsets (LSP is 0-based UTF-16; xed buffer iters are 0-based
-# lines. For offsets we treat text as a plain Python string, which matches
-# for ASCII and is close enough for trigger/completion bookkeeping.)
+# Positions / offsets (LSP positions are 0-based UTF-16 code units; buffer
+# iters count unicode characters. The two agree for BMP text and differ
+# only for astral characters (emoji etc.) — convert properly so Roslyn
+# gets the right column, like VSCode does.)
 # ---------------------------------------------------------------------------
 
+def _utf16_len(text: str) -> int:
+    try:
+        return len(text.encode("utf-16-le")) // 2
+    except Exception:
+        return len(text)
+
+
+def _utf16_slice(text: str, units: int) -> str:
+    """First ``units`` UTF-16 code units of ``text`` as a str."""
+    if units <= 0:
+        return ""
+    try:
+        raw = text.encode("utf-16-le")
+        cut = max(0, min(units * 2, len(raw)))
+        # Avoid splitting a surrogate pair.
+        while cut >= 2 and cut < len(raw):
+            lo = int.from_bytes(raw[cut - 2 : cut], "little")
+            if 0xD800 <= lo <= 0xDBFF:
+                cut -= 2
+                break
+            break
+        return raw[:cut].decode("utf-16-le", errors="ignore")
+    except Exception:
+        return text[:units]
+
+
 def offset_to_position(text: str, offset: int) -> Tuple[int, int]:
-    """Convert a char offset into an (line, character) pair (both 0-based)."""
+    """Convert a char offset into an (line, character) pair (both 0-based).
+
+    ``character`` is in UTF-16 code units per LSP (matches plain length
+    for ASCII/BMP text).
+    """
     offset = max(0, min(offset, len(text)))
     line = text.count("\n", 0, offset)
     line_start = text.rfind("\n", 0, offset) + 1
-    return line, offset - line_start
+    return line, _utf16_len(text[line_start:offset])
 
 
 def position_to_offset(text: str, line: int, character: int) -> int:
-    """Convert a 0-based (line, character) pair into a char offset."""
+    """Convert a 0-based (line, character) pair into a char offset.
+
+    ``character`` is interpreted as UTF-16 code units per LSP.
+    """
     lines = text.split("\n")
+    if not lines:
+        return 0
     line = max(0, min(line, len(lines) - 1))
-    character = max(0, min(character, len(lines[line])))
+    prefix = _utf16_slice(lines[line], max(0, character))
+    character = len(prefix)
     return sum(len(lines[i]) + 1 for i in range(line)) + character
 
 
@@ -128,6 +165,42 @@ def line_start_offset(text: str, line: int) -> int:
 # Completion
 # ---------------------------------------------------------------------------
 
+#: VSCode-style commit characters for C#. GtkSource4 has no native
+#: commit-char API, so the plugin best-effort accepts on these in the
+#: fallback popup; the GtkSource path documents the gap (see gscompletion).
+COMMIT_CHARACTERS = (".", "(", "[", "<", ";", ",")
+
+#: LSP CompletionItemKind -> Gtk icon-name. Names follow the GNOME icon
+#: theme / GtkSource convention; unknown kinds fall back to no icon.
+COMPLETION_KIND_ICONS = {
+    1: "completion-text",  # Text
+    2: "completion-method",  # Method
+    3: "completion-function",  # Function
+    4: "completion-constructor",  # Constructor
+    5: "completion-field",  # Field
+    6: "completion-variable",  # Variable
+    7: "completion-class",  # Class
+    8: "completion-interface",  # Interface
+    9: "completion-module",  # Module
+    10: "completion-property",  # Property
+    11: "completion-unit",  # Unit
+    12: "completion-value",  # Value
+    13: "completion-enum",  # Enum
+    14: "completion-keyword",  # Keyword
+    15: "completion-snippet",  # Snippet
+    16: "completion-color",  # Color
+    17: "completion-file",  # File
+    18: "completion-reference",  # Reference
+    19: "completion-folder",  # Folder
+    20: "completion-enum-member",  # EnumMember
+    21: "completion-constant",  # Constant
+    22: "completion-struct",  # Struct
+    23: "completion-event",  # Event
+    24: "completion-operator",  # Operator
+    25: "completion-type",  # TypeParameter
+}
+
+
 @dataclass
 class CompletionItem:
     label: str
@@ -137,6 +210,15 @@ class CompletionItem:
     replace_start: int = 0
     replace_end: int = 0
     kind: int = 0
+    # VSCode-parity fields (all optional; older servers omit them).
+    filter_text: str = ""
+    sort_text: str = ""
+    insert_format: int = 1  # 1=PlainText, 2=Snippet
+    insert_start: int = 0
+    insert_end: int = 0
+    additional_edits: list = field(default_factory=list)
+    commit_chars: list = field(default_factory=list)
+    preselect: bool = False
 
 
 def _markdown_to_text(value) -> str:
@@ -151,13 +233,53 @@ def _markdown_to_text(value) -> str:
     return str(value)
 
 
+def _strip_fences(text: str) -> str:
+    """Strip markdown code fences for plain-text proposal info."""
+    text = re.sub(r"```[a-zA-Z#]*\n?", "", text)
+    return text.strip()
+
+
+_SNIPPET_PLACEHOLDER_RE = re.compile(r"\$\{(\d+):([^}]*)\}")
+_SNIPPET_TABSTOP_RE = re.compile(r"\$(\d+)")
+_SNIPPET_BRACE_RE = re.compile(r"\$\{(\d+)\}")
+
+
+def snippet_to_plain(snippet: str) -> str:
+    """Best-effort Snippet -> plain text (VSCode tabstops removed).
+
+    ``${1:foo}`` -> ``foo``, ``$1``/``$0`` -> ````. Escapes (``\\$``)
+    are left as-is; full snippet expansion with placeholders is out of
+    scope for the GtkSource provider.
+    """
+    if not snippet:
+        return ""
+    text = _SNIPPET_PLACEHOLDER_RE.sub(lambda m: m.group(2), snippet)
+    text = _SNIPPET_BRACE_RE.sub("", text)
+    text = _SNIPPET_TABSTOP_RE.sub("", text)
+    return text
+
+
+def completion_is_incomplete(response: dict) -> bool:
+    """True when the server sent ``isIncomplete`` (VSCode re-queries)."""
+    try:
+        result = (response or {}).get("result")
+        if isinstance(result, dict):
+            return bool(result.get("isIncomplete"))
+    except Exception:
+        pass
+    return False
+
+
 def parse_completion(
-    response: dict, text: str, offset: int, max_items: int = 50
+    response: dict, text: str, offset: int, max_items: int = 500
 ) -> List[CompletionItem]:
     """Parse a textDocument/completion response into UI items.
 
     The replace range defaults to the identifier at the cursor; an LSP
     textEdit (if present and intersecting the cursor) overrides it.
+    Both ``textEdit.range`` and ``textEdit.insert/replace`` shapes are
+    understood. Items keep Roslyn's relevance order unless ``sortText``
+    is present, in which case they are stably sorted by it (VSCode).
     """
     result = response.get("result") if isinstance(response, dict) else None
     if result is None:
@@ -167,42 +289,114 @@ def parse_completion(
         return []
     fallback_start, fallback_end = word_range_at(text, offset)
     items: List[CompletionItem] = []
-    for raw in raw_items[:max_items]:
+    indexed: List[tuple[int, CompletionItem]] = []
+    for index, raw in enumerate(raw_items[:max_items]):
         if not isinstance(raw, dict):
             continue
         label = str(raw.get("label", ""))
         if not label:
+            # labelDetails-only items still need a label; skip empties.
             continue
         detail = str(raw.get("detail", "") or "")
-        documentation = _markdown_to_text(raw.get("documentation"))[:1000]
-        insert_text = str(raw.get("insertText", "") or raw.get("textEdit", {}).get("newText", "") or label)
+        documentation = _strip_fences(_markdown_to_text(raw.get("documentation")))[:1000]
+        try:
+            insert_format = int(raw.get("insertTextFormat", 1))
+        except (TypeError, ValueError):
+            insert_format = 1
+        raw_insert = str(
+            raw.get("insertText", "")
+            or raw.get("textEdit", {}).get("newText", "")
+            or label
+        )
+        insert_text = snippet_to_plain(raw_insert) if insert_format == 2 else raw_insert
         start, end = fallback_start, fallback_end
+        insert_start, insert_end = fallback_start, fallback_end
         text_edit = raw.get("textEdit") or {}
-        edit_range = text_edit.get("range") or text_edit.get("insert", {}).get("range")
-        if isinstance(edit_range, dict):
-            try:
-                s = edit_range.get("start", {})
-                e = edit_range.get("end", {})
+        single_range = text_edit.get("range") if isinstance(text_edit, dict) else None
+        insert_range = (text_edit.get("insert") or {}).get("range") if isinstance(text_edit, dict) else None
+        replace_range = (text_edit.get("replace") or {}).get("range") if isinstance(text_edit, dict) else None
+        try:
+            if isinstance(replace_range, dict) and isinstance(insert_range, dict):
+                s = insert_range.get("start", {})
+                e = insert_range.get("end", {})
+                insert_start = position_to_offset(text, int(s.get("line", 0)), int(s.get("character", 0)))
+                insert_end = position_to_offset(text, int(e.get("line", 0)), int(e.get("character", 0)))
+                s = replace_range.get("start", {})
+                e = replace_range.get("end", {})
                 start = position_to_offset(text, int(s.get("line", 0)), int(s.get("character", 0)))
                 end = position_to_offset(text, int(e.get("line", 0)), int(e.get("character", 0)))
-            except (TypeError, ValueError):
-                pass
+            elif isinstance(single_range, dict):
+                s = single_range.get("start", {})
+                e = single_range.get("end", {})
+                start = position_to_offset(text, int(s.get("line", 0)), int(s.get("character", 0)))
+                end = position_to_offset(text, int(e.get("line", 0)), int(e.get("character", 0)))
+                insert_start, insert_end = start, end
+        except (TypeError, ValueError):
+            pass
         try:
             kind = int(raw.get("kind", 0))
         except (TypeError, ValueError):
             kind = 0
-        items.append(
-            CompletionItem(
-                label=label,
-                detail=detail,
-                documentation=documentation,
-                insert_text=insert_text,
-                replace_start=start,
-                replace_end=end,
-                kind=kind,
+        filter_text = str(raw.get("filterText", "") or "")
+        sort_text = str(raw.get("sortText", "") or "")
+        additional = raw.get("additionalTextEdits") or []
+        if not isinstance(additional, list):
+            additional = []
+        commits = raw.get("commitCharacters") or []
+        if not isinstance(commits, list):
+            commits = []
+        indexed.append(
+            (
+                index,
+                CompletionItem(
+                    label=label,
+                    detail=detail,
+                    documentation=documentation,
+                    insert_text=insert_text,
+                    replace_start=start,
+                    replace_end=end,
+                    kind=kind,
+                    filter_text=filter_text,
+                    sort_text=sort_text,
+                    insert_format=insert_format,
+                    insert_start=insert_start,
+                    insert_end=insert_end,
+                    additional_edits=list(additional),
+                    commit_chars=[str(c) for c in commits if c],
+                    preselect=bool(raw.get("preselect")),
+                ),
             )
         )
+    # VSCode sorts by sortText when the server provides it; otherwise the
+    # server order is already relevance order — keep it stable.
+    if any(item.sort_text for _, item in indexed):
+        indexed.sort(key=lambda pair: (pair[1].sort_text or "\uffff", pair[0]))
+        items = [item for _, item in indexed]
+    else:
+        items = [item for _, item in indexed]
     return items
+
+
+def completion_filter_text(item: CompletionItem) -> str:
+    """Text the framework filters on (VSCode: filterText or label)."""
+    return item.filter_text or item.label
+
+
+def completion_info_text(item: CompletionItem, max_len: int = 1000) -> str:
+    """Combined detail + documentation for the proposal info pane."""
+    detail = (item.detail or "").strip()
+    doc = (item.documentation or "").strip()
+    if detail and doc:
+        return f"{detail}\n{doc}"[:max_len]
+    return (detail or doc)[:max_len]
+
+
+def completion_icon_name(kind: int) -> str:
+    """Gtk icon-name for an LSP CompletionItemKind ('' if unknown)."""
+    try:
+        return COMPLETION_KIND_ICONS.get(int(kind), "")
+    except (TypeError, ValueError):
+        return ""
 
 
 def should_trigger_completion(typed_char: str) -> bool:
