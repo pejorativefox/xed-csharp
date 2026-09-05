@@ -10,26 +10,96 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "plugins", "fuz
 
 from fuzzyfinder import files as files_mod
 from fuzzyfinder import find_project_root
-from fuzzyfinder.matcher import fuzzy_find, fuzzy_score
+from fuzzyfinder.matcher import FuzzyIndex, fuzzy_find, fuzzy_match, fuzzy_score
 
 
 def test_score_orders_tight_over_gappy():
     tight = fuzzy_score("abc", "abc")
     gappy = fuzzy_score("abc", "aXbXc")
     assert tight is not None and gappy is not None
-    assert tight < gappy
+    assert tight > gappy
 
 
 def test_score_prefers_prefix_and_segments():
-    assert fuzzy_score("con", "Console") < fuzzy_score("con", "XenonConsole")
-    assert fuzzy_score("sce", "ScenePresets.cs") < fuzzy_score("sce", "XenonScene.cs")
+    assert fuzzy_score("con", "Console") > fuzzy_score("con", "XenonConsole")
+    assert fuzzy_score("sce", "ScenePresets.cs") > fuzzy_score("sce", "XenonScene.cs")
 
 
 def test_score_case_insensitive_and_empty():
-    assert fuzzy_score("COU", "count") == fuzzy_score("cou", "Count")
+    assert fuzzy_score("cou", "count") == fuzzy_score("cou", "Count")
     assert fuzzy_score("", "anything") == 0
     assert fuzzy_score("xyz", "abc") is None
     assert fuzzy_score("abcd", "abc") is None
+
+
+def test_score_prefers_consecutive_and_word_starts():
+    assert fuzzy_score("fb", "foo/bar") > fuzzy_score("fb", "fobble")
+    assert fuzzy_score("amo", "app/models/post") > fuzzy_score("amo", "aamoo")
+    assert fuzzy_score("ad", "AutomatorDocument") > fuzzy_score("ad", "axxxxxxd")
+
+
+def test_score_finds_optimal_alignment_not_greedy():
+    # Greedy left-to-right would pin 'a' at 0 and pay a long gap; the
+    # optimal alignment matches the later consecutive run instead.
+    assert fuzzy_score("ab", "axxbab") > fuzzy_score("ab", "axbxbxb")
+    hit = fuzzy_match("ab", "axxbab")
+    assert hit is not None
+    _, positions = hit
+    assert positions == [4, 5]
+
+
+def test_positions_valid_subsequence():
+    for query, candidate in (
+        ("scene", "source/CoreForge/ScenePresets.cs"),
+        ("cp", "CoreForge/Places.cs"),
+        ("fb", "FooBar.cs"),
+    ):
+        hit = fuzzy_match(query, candidate)
+        assert hit is not None
+        _, positions = hit
+        assert len(positions) == len(query)
+        assert positions == sorted(positions)
+        assert "".join(candidate[i] for i in positions).lower() == query.lower()
+
+
+def test_smart_case():
+    # Lowercase query: case-insensitive.
+    assert fuzzy_score("scene", "ScenePresets.cs") is not None
+    # Uppercase query: case-sensitive.
+    assert fuzzy_score("Scene", "ScenePresets.cs") is not None
+    assert fuzzy_score("Scene", "scenepresets.cs") is None
+    assert fuzzy_score("FBB", "FooBarBaz") is not None
+    assert fuzzy_score("FBB", "foobarbaz") is None
+
+
+def test_multi_term_and_semantics():
+    paths = [
+        "source/CoreForge/Places.cs",
+        "source/CoreForge/Scene.cs",
+        "tests/places_notes.md",
+    ]
+    assert fuzzy_find("core places", paths) == ["source/CoreForge/Places.cs"]
+    assert fuzzy_find("core zzz", paths) == []
+    assert fuzzy_match("core places", "source/CoreForge/Scene.cs") is None
+
+
+def test_exact_basename_boost():
+    assert fuzzy_find(
+        "places.cs", ["source/CoreForge/Places.cs", "source/places.cs.bak"]
+    )[0] == "source/CoreForge/Places.cs"
+
+
+def test_index_matches_direct_scoring():
+    paths = [
+        "source/CoreForge/ScenePresets.cs",
+        "tests/CoreForge.Tests/Places.cs",
+        "source/CoreForge/Program.cs",
+        "README.md",
+    ]
+    index = FuzzyIndex(paths)
+    for query in ("scene", "prog", "core cs", "md", "zzz", ""):
+        assert index.search(query) == fuzzy_find(query, paths)
+        assert index.search(query, limit=2) == fuzzy_find(query, paths, limit=2)
 
 
 def test_find_ranks_limits_and_culls():

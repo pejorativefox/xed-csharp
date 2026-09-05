@@ -121,7 +121,7 @@ except Exception:
     Gtk = Gio = Gdk = None  # type: ignore[no-redef]
 
 from .files import list_project_files
-from .matcher import fuzzy_find
+from .matcher import FuzzyIndex, fuzzy_find
 
 (COL_LABEL, COL_PATH) = range(2)
 MAX_ROWS = 60
@@ -181,6 +181,7 @@ if Gtk is not None:
                     _debug(f"fuzzy transient_for failed: {e!r}")
             self.set_default_size(560, 380)
             self._files: list[tuple[str, str]] = []
+            self._index: FuzzyIndex | None = None
             self._entry = Gtk.Entry()
             try:
                 self._entry.set_placeholder_text("Type to filter…")
@@ -208,6 +209,15 @@ if Gtk is not None:
         def set_files(self, items: list[tuple[str, str]]) -> None:
             """items: (display, path) pairs."""
             self._files = list(items)
+            # Score the relative display paths, not the absolute ones: the
+            # common /home/... prefix would otherwise drown out real
+            # differences. The index is built once; each keystroke only
+            # re-runs the DP via _refilter.
+            try:
+                self._index = FuzzyIndex([display for display, _path in self._files])
+            except Exception as e:
+                _debug(f"fuzzy index build failed: {e!r}")
+                self._index = None
             self._refilter()
             try:
                 self._entry.grab_focus()
@@ -216,12 +226,16 @@ if Gtk is not None:
 
         def _refilter(self) -> None:
             query = self._entry.get_text()
-            paths = [path for _display, path in self._files]
-            labels = {path: display for display, path in self._files}
+            labels = {display: path for display, path in self._files}
+            displays = [display for display, _path in self._files]
             self._store.clear()
             try:
-                for path in fuzzy_find(query, paths, limit=MAX_ROWS):
-                    self._store.append([labels.get(path, path), path])
+                if self._index is not None:
+                    ranked = self._index.search(query, limit=MAX_ROWS)
+                else:
+                    ranked = fuzzy_find(query, displays, limit=MAX_ROWS)
+                for display in ranked:
+                    self._store.append([display, labels.get(display, display)])
             except Exception as e:
                 _debug(f"fuzzy refilter failed: {e!r}")
             self._select_row(0)

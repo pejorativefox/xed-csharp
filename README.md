@@ -38,7 +38,8 @@ Additional standalone plugins:
   `xed-code [folder]` opens any folder in a new window (`code .` equivalent;
   `$HOME`/`/` never auto-load, marker-less folders prompt instead of loading).
 - **fuzzy-finder**: `Ctrl+P` quick-open dialog listing every file under the
-  folder loaded in project-mode (gitignore-aware), with subsequence filtering.
+  folder loaded in project-mode (gitignore-aware), with fzy-style fuzzy
+  ranking (word-boundary/camelCase bonuses, multi-term AND, smart case).
   Soft-depends on project-mode at runtime: with no folder loaded it prompts
   to pick one first.
 - **feature-toggle**: hides xed's built-in Documents list and closes the lone
