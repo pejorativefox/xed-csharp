@@ -156,6 +156,34 @@ def project_tree(root_dir: str, max_depth: int = 8) -> List[FileNode]:
     return nodes
 
 
+def solution_files(model: SolutionModel) -> List[str]:
+    """Flat file index for quick-open: sln, projects, then their .cs files."""
+    seen: set[str] = set()
+    out: List[str] = []
+
+    def add(path: str) -> None:
+        if path and path not in seen:
+            seen.add(path)
+            out.append(path)
+
+    def add_nodes(nodes: List[FileNode]) -> None:
+        for node in nodes:
+            if node.is_dir:
+                add_nodes(node.children)
+            else:
+                add(node.path)
+
+    if model.path:
+        add(model.path)
+    for project in model.projects:
+        add(project.path)
+        try:
+            add_nodes(project_tree(os.path.dirname(project.path)))
+        except Exception:
+            continue
+    return out
+
+
 def parse_sln_list_output(text: str, solution_dir: str) -> List[str]:
     """Parse `dotnet sln list` output into absolute .csproj paths."""
     projects: List[str] = []

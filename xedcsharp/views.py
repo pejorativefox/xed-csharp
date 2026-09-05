@@ -119,6 +119,7 @@ class ViewTracker(GObject.Object):
             (GObject.TYPE_STRING, GObject.TYPE_INT),
         ),
         "launch-debug": (GObject.SignalFlags.RUN_LAST, None, ()),
+        "fuzzy-finder": (GObject.SignalFlags.RUN_LAST, None, ()),
     }
 
     def __init__(self) -> None:
@@ -286,8 +287,6 @@ class ViewTracker(GObject.Object):
         return offset_to_position(buffer_text(doc), cursor_offset(doc))
 
     def _on_key_press(self, view, event, doc) -> bool:
-        if not is_csharp_doc(doc):
-            return False
         try:
             mods = event.state & Gtk.accelerator_get_default_mod_mask()
             keyval = event.keyval
@@ -296,6 +295,13 @@ class ViewTracker(GObject.Object):
             shift = bool(mods & Gdk.ModifierType.SHIFT_MASK)
             alt = bool(mods & Gdk.ModifierType.MOD1_MASK)
         except Exception:
+            return False
+        if ctrl and not shift and not alt and keyname.lower() == "p":
+            # Quick-open fuzzy finder in every file type (clobbers Print).
+            debug("key: Ctrl+P fuzzy-finder (all file types)")
+            self.emit("fuzzy-finder")
+            return True
+        if not is_csharp_doc(doc):
             return False
         path = doc_path(doc)
         if not path:

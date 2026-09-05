@@ -110,6 +110,7 @@ try:
     from .output import OutputView
     from .testpanel import TestPanel
     from .debugpanel import DebugPanel
+    from .fuzzy import FuzzyFinderDialog
     from .completion import COMMIT_CHARS, CompletionPopup, NAV_KEYS
     from . import gscompletion as gs_mod
     from .views import (
@@ -200,6 +201,7 @@ except Exception:  # headless unit tests / missing typelib outside xed
     Gtk = Gio = Gdk = Pango = None  # type: ignore[no-redef]
     GtkSource = None  # type: ignore[no-redef]
     SolutionExplorer = OutputView = TestPanel = None  # type: ignore[no-redef]
+    FuzzyFinderDialog = None  # type: ignore[no-redef]
     DebugPanel = CompletionPopup = ViewTracker = None  # type: ignore[no-redef]
     NAV_KEYS = frozenset()  # type: ignore[no-redef]
     COMMIT_CHARS = frozenset({".", "(", "["})  # type: ignore[no-redef]
@@ -340,6 +342,7 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         self._dap_project: str | None = None
         self._discovering_tests = False
         self._completion_warned = ""
+        self._solution_files: list[str] = []
 
     # -- activation --------------------------------------------------
     def do_activate(self) -> None:
@@ -402,6 +405,7 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             self._connect(self.tracker, "code-action-request", self._on_code_action_request)
             self._connect(self.tracker, "toggle-breakpoint", lambda _w, p, l: self._toggle_breakpoint(p, l))
             self._connect(self.tracker, "launch-debug", lambda _w: self._debug_project(None))
+            self._connect(self.tracker, "fuzzy-finder", lambda _w: self._show_fuzzy_finder())
             try:
                 self.tracker.attach(self.window)
             except Exception as e:
@@ -637,6 +641,11 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         debug(f"refresh solution from {start} (active={active} cwd={cwd})")
         dotnet = self._dotnet()
         self._model = solution_mod.load_solution(start, dotnet)
+        try:
+            self._solution_files = solution_mod.solution_files(self._model)
+        except Exception as e:
+            debug(f"solution file index failed: {e!r}")
+            self._solution_files = []
         if self.explorer is not None:
             self.explorer.set_model(self._model)
         if self.output is not None:
@@ -1455,6 +1464,42 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
 
     def _open_file(self, path: str) -> None:
         self._jump_to(path, 0, 0)
+
+    def _show_fuzzy_finder(self) -> None:
+        files = list(getattr(self, "_solution_files", None) or [])
+        if not files:
+            if self.output is not None:
+                self.output.set_status("No files in solution — open a solution first.")
+            return
+        if FuzzyFinderDialog is None:
+            debug("fuzzy finder unavailable (no GTK)")
+            return
+        root = ""
+        try:
+            root = (self._model.root_dir if self._model else "") or ""
+        except Exception:
+            root = ""
+        items: list[tuple[str, str]] = []
+        for path in files:
+            try:
+                display = os.path.relpath(path, root) if root else path
+            except Exception:
+                display = path
+            items.append((display, path))
+        try:
+            dialog = FuzzyFinderDialog(parent=self.window)
+        except Exception as e:
+            debug(f"fuzzy dialog create failed: {e!r}")
+            return
+        dialog.set_files(items)
+        dialog.connect("open-file", lambda _w, p: (self._jump_to(p, 0, 0), dialog.destroy()))
+        try:
+            dialog.run()
+        finally:
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
 
     def _on_goto_definition(self, _tracker, path: str, line: int, char: int) -> None:
         if not self._roslyn_ready():
