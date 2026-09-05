@@ -273,6 +273,110 @@ def resolve_startup_root(
     return ("none", None)
 
 
+#: Debounce for file-monitor-triggered git refreshes. The old 500ms value
+#: let a `.git/index` touch from our own `git status` re-fire the monitor
+#: into a steady ~2Hz refresh loop (subprocess + full tree recolor each
+#: cycle). 1200ms coalesces bursts without feeling stale.
+GIT_REFRESH_DEBOUNCE_MS = 1200
+
+#: Minimum time between two monitor-triggered `git status` runs. Manual
+#: refreshes (set_root) bypass this via force=True. Prevents a hot
+#: `.git/` (fetch/gc/index rewrite) from keeping the editor busy.
+GIT_REFRESH_MIN_INTERVAL_S = 10.0
+
+#: Relative paths inside `.git/` that genuinely change status output.
+#: Everything else (objects/, logs/, index.lock, *.tmp, …) is noise —
+#: notably `git status` itself may rewrite `index`, which used to
+#: self-trigger the next refresh.
+_GIT_RELEVANT_FILES = frozenset({"HEAD", "index", "packed-refs", "ORIG_HEAD", "FETCH_HEAD"})
+
+_GIT_NOISE_SUFFIXES = (".lock", ".tmp", ".swp", "~")
+
+
+def _rel_within(path: str, base: str) -> str | None:
+    """Relative path of `path` under `base`, or None when outside."""
+    try:
+        abs_path = os.path.abspath(path)
+        abs_base = os.path.abspath(base)
+    except Exception:
+        return None
+    try:
+        rel = os.path.relpath(abs_path, abs_base)
+    except Exception:
+        return None
+    if rel == ".":
+        return ""
+    if rel.startswith(".." + os.sep) or rel == "..":
+        return None
+    return rel
+
+
+def should_refresh_for_git_event(
+    root_dir: str,
+    file_path: str | None,
+    other_path: str | None = None,
+    event_type: str = "",
+) -> bool:
+    """Headless-safe filter: does this monitor event merit a re-query?
+
+    - Events inside `.git/` only count for status-relevant files
+      (HEAD/index/refs/...). objects/logs/locks are ignored so our own
+      `git status` touching `index` cannot self-trigger a loop.
+    - Events elsewhere under the root (top-level dir monitor) count —
+      they may signal added/removed files.
+    - Events outside the root never count.
+    """
+    try:
+        candidates = [p for p in (file_path, other_path) if p]
+        if not candidates:
+            # Conservative: unknown file, but only if some monitor fired —
+            # treat as relevant so we never miss a real change.
+            return True
+        git_dir = os.path.join(os.path.abspath(root_dir), ".git")
+        for candidate in candidates:
+            rel_root = _rel_within(candidate, root_dir)
+            if rel_root is None:
+                continue
+            if rel_root == ".git" or rel_root.startswith(".git" + os.sep):
+                rel_git = _rel_within(candidate, git_dir)
+                if rel_git is None or rel_git == "":
+                    # The `.git` dir itself changed (e.g. created) — refresh.
+                    return True
+                base = os.path.basename(rel_git)
+                if base.endswith(_GIT_NOISE_SUFFIXES):
+                    continue
+                first = rel_git.split(os.sep, 1)[0]
+                if rel_git in _GIT_RELEVANT_FILES or first == "refs":
+                    return True
+                # Noise inside .git (objects/logs/info/hooks/…) — ignore.
+                continue
+            # A real path under the project root changed.
+            return True
+        return False
+    except Exception:
+        return True
+
+
+def git_event_paths(file_obj, other_obj=None) -> tuple[str | None, str | None]:
+    """Best-effort Gio.File -> filesystem path (headless-safe)."""
+    def _one(obj) -> str | None:
+        if obj is None:
+            return None
+        try:
+            get_path = getattr(obj, "get_path", None)
+            if callable(get_path):
+                value = get_path()
+                return value if isinstance(value, str) else None
+        except Exception:
+            pass
+        return None
+
+    try:
+        return (_one(file_obj), _one(other_obj))
+    except Exception:
+        return (None, None)
+
+
 @dataclass
 class FileNode:
     name: str
@@ -371,6 +475,9 @@ if Gtk is not None:
             self._git_generation = 0
             self._monitors: list = []
             self._refresh_timer = None
+            self._git_root_cached: str | None = None
+            self._last_git_refresh = 0.0
+            self._tree_generation = 0
 
             header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
             self._root_label = Gtk.Label(label="No folder selected")
@@ -408,27 +515,116 @@ if Gtk is not None:
 
         def set_root(self, folder: str) -> None:
             self._git_generation += 1
+            self._tree_generation += 1
+            generation = self._tree_generation
             self._cancel_monitors()
             self._root_dir = folder
             self._git_statuses = {}
-            self.store.clear()
+            self._git_root_cached = None
+            try:
+                self.store.clear()
+            except Exception:
+                pass
             if not folder or not os.path.isdir(folder):
                 self._root_label.set_text("No folder selected")
                 return
             base = os.path.basename(folder.rstrip(os.sep)) or folder
             self._root_label.set_text(base)
-            root_iter = self.store.append(
-                None,
-                [_TREE_FOLDER_ICON, base + "/", folder, "folder", None],
-            )
-            for node in build_file_tree(folder):
-                self._append_node(root_iter, node, {})
+            try:
+                root_iter = self.store.append(
+                    None,
+                    [_TREE_FOLDER_ICON, base + "/", folder, "folder", None],
+                )
+                self.store.append(
+                    root_iter, [_TREE_FILE_ICON, "Loading…", folder, "loading", None]
+                )
+            except Exception:
+                root_iter = None
             try:
                 self.tree.expand_row(Gtk.TreePath.new_from_indices([0]), False)
             except Exception:
                 pass
             self._setup_git_monitors(folder)
-            self.refresh_git_statuses()
+            # Build the file list off the UI thread; even mid-size repos
+            # made the old synchronous walk hitch the editor on open.
+            try:
+                thread = threading.Thread(
+                    target=self._build_tree_thread,
+                    args=(folder, generation),
+                    daemon=True,
+                )
+                thread.start()
+            except Exception as e:
+                _debug(f"tree build spawn failed: {e!r}")
+                try:
+                    self._populate_tree(build_file_tree(folder), generation)
+                except Exception:
+                    pass
+            self.refresh_git_statuses(force=True)
+
+        def _build_tree_thread(self, folder: str, generation: int) -> None:
+            try:
+                nodes = build_file_tree(folder)
+            except Exception as e:
+                _debug(f"tree build failed for {folder}: {e!r}")
+                nodes = []
+            try:
+                if GLib is not None:
+                    GLib.idle_add(self._populate_tree, nodes, generation)
+                else:
+                    self._populate_tree(nodes, generation)
+            except Exception as e:
+                _debug(f"tree populate schedule failed: {e!r}")
+
+        def _populate_tree(self, nodes, generation: int) -> bool:
+            if generation != self._tree_generation:
+                return False
+            try:
+                self.store.clear()
+            except Exception:
+                return False
+            folder = self._root_dir
+            if not folder or not os.path.isdir(folder):
+                return False
+            base = os.path.basename(folder.rstrip(os.sep)) or folder
+            try:
+                root_iter = self.store.append(
+                    None,
+                    [_TREE_FOLDER_ICON, base + "/", folder, "folder", None],
+                )
+            except Exception:
+                return False
+            try:
+                self._freeze_tree(True)
+                for node in nodes:
+                    self._append_node(root_iter, node, {})
+            except Exception as e:
+                _debug(f"tree populate failed: {e!r}")
+            finally:
+                try:
+                    self._freeze_tree(False)
+                except Exception:
+                    pass
+            try:
+                self.tree.expand_row(Gtk.TreePath.new_from_indices([0]), False)
+            except Exception:
+                pass
+            # Statuses may have arrived while the tree was building.
+            if self._git_statuses:
+                try:
+                    self._apply_git_statuses(self._git_statuses, self._git_generation)
+                except Exception:
+                    pass
+            return False
+
+        def _freeze_tree(self, freeze: bool) -> None:
+            try:
+                if freeze:
+                    self.tree.freeze_child_notify()
+                else:
+                    self.tree.thaw_child_notify()
+            except Exception:
+                pass
 
         def _append_node(self, parent, node: FileNode, statuses: dict | None = None) -> str | None:
             gs = _gitstatus if _gitstatus is not None else None
@@ -457,15 +653,46 @@ if Gtk is not None:
             return color
 
         # -- git -------------------------------------------------------
-        def refresh_git_statuses(self) -> None:
-            """Re-query `git status` off the UI thread, then repaint colors."""
+        def refresh_git_statuses(self, force: bool = False) -> None:
+            """Re-query `git status` off the UI thread, then repaint colors.
+
+            Monitor-triggered callers pass force=False and are rate-limited
+            (GIT_REFRESH_MIN_INTERVAL_S) so a hot `.git/` cannot keep the
+            editor busy; set_root passes force=True.
+            """
             root = self._root_dir
             if not root or not os.path.isdir(root):
                 return
             if _gitstatus is None:
                 return
+            if not force:
+                try:
+                    now = time.monotonic()
+                except Exception:
+                    now = 0.0
+                try:
+                    last = float(getattr(self, "_last_git_refresh", 0.0) or 0.0)
+                except Exception:
+                    last = 0.0
+                if now and last and (now - last) < GIT_REFRESH_MIN_INTERVAL_S:
+                    try:
+                        remaining_ms = int(
+                            (GIT_REFRESH_MIN_INTERVAL_S - (now - last)) * 1000
+                        )
+                    except Exception:
+                        remaining_ms = 0
+                    if remaining_ms > 0:
+                        self._arm_git_timer(
+                            max(remaining_ms, GIT_REFRESH_DEBOUNCE_MS),
+                            self._git_generation,
+                        )
+                    return
             self._git_generation += 1
             generation = self._git_generation
+            try:
+                self._last_git_refresh = time.monotonic()
+            except Exception:
+                pass
             try:
                 thread = threading.Thread(
                     target=self._query_git_thread,
@@ -479,7 +706,13 @@ if Gtk is not None:
         def _query_git_thread(self, root: str, generation: int) -> None:
             statuses: dict = {}
             try:
-                git_root = _gitstatus.find_git_root(root)
+                git_root = getattr(self, "_git_root_cached", None)
+                if not git_root or not os.path.isdir(git_root):
+                    git_root = _gitstatus.find_git_root(root)
+                    try:
+                        self._git_root_cached = git_root
+                    except Exception:
+                        pass
                 if git_root:
                     statuses = _gitstatus.get_git_statuses(git_root)
             except Exception as e:
@@ -493,21 +726,50 @@ if Gtk is not None:
             except Exception as e:
                 _debug(f"git apply schedule failed: {e!r}")
 
+        def _status_color_map(self, statuses: dict) -> dict:
+            """Precompute {abspath: color} once per refresh (no per-row abspath)."""
+            color_map: dict = {}
+            gs = _gitstatus
+            if gs is None or not statuses:
+                return color_map
+            try:
+                for path, code in statuses.items():
+                    try:
+                        color = gs.status_to_color(code[0], code[1])
+                    except Exception:
+                        continue
+                    if color is None:
+                        continue
+                    try:
+                        color_map[os.path.abspath(path)] = color
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            return color_map
+
         def _apply_git_statuses(self, statuses: dict, generation: int) -> bool:
             if generation != self._git_generation:
                 return False
-            self._git_statuses = statuses or {}
+            statuses = statuses or {}
+            if statuses == self._git_statuses:
+                # Steady state (e.g. our own index touch re-firing the
+                # monitor): skip the full tree walk entirely.
+                return False
+            self._git_statuses = statuses
             try:
                 root_iter = self.store.get_iter_first()
             except Exception:
                 root_iter = None
             if root_iter is None:
                 return False
+            color_map = self._status_color_map(statuses)
             try:
+                self._freeze_tree(True)
                 child = self.store.iter_children(root_iter)
                 colors: list = []
                 while child is not None:
-                    colors.append(self._recolor_subtree(child))
+                    colors.append(self._recolor_subtree(child, color_map))
                     try:
                         child = self.store.iter_next(child)
                     except Exception:
@@ -515,26 +777,48 @@ if Gtk is not None:
                 gs = _gitstatus
                 root_color = gs.aggregate_dir_color(colors) if gs is not None else None
                 try:
-                    self.store.set_value(root_iter, self._col_fg, root_color)
+                    current = self.store.get_value(root_iter, self._col_fg)
                 except Exception:
-                    pass
+                    current = object()
+                if current != root_color:
+                    try:
+                        self.store.set_value(root_iter, self._col_fg, root_color)
+                    except Exception:
+                        pass
             except Exception as e:
                 _debug(f"git recolor failed: {e!r}")
+            finally:
+                try:
+                    self._freeze_tree(False)
+                except Exception:
+                    pass
             return False
 
-        def _recolor_subtree(self, tree_iter) -> str | None:
+        def _recolor_subtree(self, tree_iter, color_map: dict | None = None) -> str | None:
             gs = _gitstatus
+            if color_map is None:
+                color_map = self._status_color_map(self._git_statuses)
             try:
                 kind = self.store.get_value(tree_iter, self._col_kind)
                 path = self.store.get_value(tree_iter, self._col_path)
             except Exception:
                 return None
             if kind == "file":
-                color = gs.color_for_path(self._git_statuses, path) if gs is not None else None
+                color = None
                 try:
-                    self.store.set_value(tree_iter, self._col_fg, color)
+                    if isinstance(path, str):
+                        color = color_map.get(os.path.abspath(path))
                 except Exception:
-                    pass
+                    color = None
+                try:
+                    current = self.store.get_value(tree_iter, self._col_fg)
+                except Exception:
+                    current = object()
+                if current != color:
+                    try:
+                        self.store.set_value(tree_iter, self._col_fg, color)
+                    except Exception:
+                        pass
                 return color
             # Folder: recurse into children, then aggregate.
             colors: list = []
@@ -543,16 +827,21 @@ if Gtk is not None:
             except Exception:
                 child = None
             while child is not None:
-                colors.append(self._recolor_subtree(child))
+                colors.append(self._recolor_subtree(child, color_map))
                 try:
                     child = self.store.iter_next(child)
                 except Exception:
                     break
             color = gs.aggregate_dir_color(colors) if gs is not None else None
             try:
-                self.store.set_value(tree_iter, self._col_fg, color)
+                current = self.store.get_value(tree_iter, self._col_fg)
             except Exception:
-                pass
+                current = object()
+            if current != color:
+                try:
+                    self.store.set_value(tree_iter, self._col_fg, color)
+                except Exception:
+                    pass
             return color
 
         def _setup_git_monitors(self, folder: str) -> None:
@@ -593,7 +882,7 @@ if Gtk is not None:
                 _debug(f"git monitors setup failed: {e!r}")
                 self._monitors = []
 
-        def _on_git_changed(self, _monitor, _file, _other, _event) -> None:
+        def _arm_git_timer(self, delay_ms: int, generation: int) -> None:
             if GLib is None:
                 return
             try:
@@ -602,10 +891,27 @@ if Gtk is not None:
                         GLib.source_remove(self._refresh_timer)
                     except Exception:
                         pass
-                generation = self._git_generation
+                    self._refresh_timer = None
                 self._refresh_timer = GLib.timeout_add(
-                    500, self._on_git_changed_fire, generation
+                    max(50, int(delay_ms)), self._on_git_changed_fire, generation
                 )
+            except Exception as e:
+                _debug(f"git change debounce failed: {e!r}")
+
+        def _on_git_changed(self, _monitor, _file, _other=None, _event=None) -> None:
+            if GLib is None:
+                return
+            try:
+                file_path, other_path = git_event_paths(_file, _other)
+                try:
+                    event_type = str(getattr(_event, "value_nick", None) or _event or "")
+                except Exception:
+                    event_type = ""
+                if not should_refresh_for_git_event(
+                    self._root_dir, file_path, other_path, event_type
+                ):
+                    return
+                self._arm_git_timer(GIT_REFRESH_DEBOUNCE_MS, self._git_generation)
             except Exception as e:
                 _debug(f"git change debounce failed: {e!r}")
 
@@ -636,6 +942,10 @@ if Gtk is not None:
         def cleanup(self) -> None:
             try:
                 self._git_generation += 1
+            except Exception:
+                pass
+            try:
+                self._tree_generation += 1
             except Exception:
                 pass
             self._cancel_monitors()
@@ -844,6 +1154,12 @@ class ProjectModePlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[
 
     def _set_root(self, folder: str) -> None:
         if not folder or not os.path.isdir(folder):
+            return
+        try:
+            if is_unsafe_root(folder):
+                _debug(f"refusing unsafe root: {folder}")
+                return
+        except Exception:
             return
         self._root_dir = os.path.abspath(folder)
         if self.browser is not None:
