@@ -21,15 +21,15 @@ XED_PLUGIN_DEBUG=1 xed
 python3 -m pytest -q
 ```
 
-Headless; GUI tests report SKIPPED. Full suite including window-spawning
-tests:
-
-```bash
-xvfb-run -a python3 -m pytest -q
-```
+Runs the full suite under `pytest-xvfb` (requires `python3-pytest-xvfb` +
+`Xvfb`): `DISPLAY` is remapped to a virtual display, so window-spawning
+tests run instead of SKIPping and nothing pops up on your screen.
+`--no-xvfb` opts out (GUI tests then use your real display / SKIP headless).
+The `xvfb-run -a` wrapper is obsolete — do not use it.
 
 Note: `tests/test_completion_popup.py::test_focus_stays_in_editor_through_show_nav_filter`
-is expected to SKIP headless and PASS under `xvfb-run`.
+needs a display and passes under the default `pytest` run (it SKIPs only
+with `--no-xvfb` headless).
 
 ## Diagnose
 
