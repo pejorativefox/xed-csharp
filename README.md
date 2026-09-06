@@ -1,9 +1,12 @@
-# xed-csharp — turn xed into a lightweight code editor
+# xed-ide-plugins — turn xed into a lightweight code editor
 
-A set of plugins that gives Linux Mint's xed editor some modern comforts:
-a project file browser with git colors, quick file opening, C# support
-with completions, git change markers in the editor gutter,
+A collection of plugins that gives Linux Mint's xed editor some modern
+comforts: a project file browser with git colors, quick file opening,
+C# support with completions, git change markers in the editor gutter,
 a built-in terminal, and handy shortcuts for hiding panes.
+
+The C# support is the **xed-csharp** subproject (`plugins/xedcsharp/`);
+the rest are small standalone plugins under `plugins/`.
 
 You don't need to know any programming to use these — install, enable,
 and edit.
@@ -28,7 +31,7 @@ and edit.
   deleted. Untracked new files show all green. Marks refresh every
   time you save.
 
-**C# support** (C# DevKit for xed)
+**C# support** (xed-csharp subproject — C# DevKit for xed)
 - Solution explorer, build / run / test per project, a test list with
   pass/fail marks, clickable error list, code completions, hover help,
    go-to-definition (`F12`), find references (`Shift+F12`), formatting

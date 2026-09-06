@@ -1,4 +1,8 @@
-# AGENTS.md — xed-csharp contributor notes
+# AGENTS.md — xed-ide-plugins contributor notes
+
+Repo layout: this repo hosts a collection of xed plugins. The C# support
+is the **xed-csharp** subproject under `plugins/xedcsharp/`; the other
+directories under `plugins/` are small standalone plugins.
 
 ## After ANY code change: reinstall the plugin
 
