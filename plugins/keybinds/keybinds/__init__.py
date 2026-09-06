@@ -73,6 +73,20 @@ def _debug(message: str) -> None:
     except Exception:
         pass
 
+def _get_clipboard_text():
+    try:
+        return Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).wait_for_text()
+    except Exception:
+        return None
+
+
+def _set_clipboard_text(text) -> bool:
+    try:
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(text, -1)
+        return True
+    except Exception:
+        return False
+
 
 try:
     import gi
@@ -184,6 +198,98 @@ class KeybindsPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[mis
         except Exception as e:
             _debug(f"tab step failed: {e!r}")
 
+    def _open_preferences(self) -> bool:
+        try:
+            ui_manager = self.window.get_ui_manager()
+        except Exception as e:
+            _debug(f"preferences ui-manager failed: {e!r}")
+            return False
+        try:
+            groups = ui_manager.get_action_groups()
+        except Exception as e:
+            _debug(f"preferences action-groups failed: {e!r}")
+            return False
+        for group in groups or ():
+            try:
+                action = group.get_action("EditPreferences")
+            except Exception:
+                action = None
+            if action is None:
+                continue
+            try:
+                action.activate()
+            except Exception as e:
+                _debug(f"preferences activate failed: {e!r}")
+                return False
+            return True
+        _debug("preferences action EditPreferences not found")
+        return False
+
+
+    def _active_editor_view(self):
+        try:
+            view = self.window.get_active_view()
+        except Exception:
+            return None
+        try:
+            if view is None or not view.is_focus():
+                return None
+        except Exception:
+            return None
+        return view
+
+    def _handle_clipboard_key(self, lowered, view) -> bool:
+        try:
+            buffer = view.get_buffer()
+            if buffer.get_has_selection() or not view.get_editable():
+                return False
+            if lowered in ("c", "x"):
+                insert = buffer.get_insert()
+                line = buffer.get_iter_at_mark(insert).get_line()
+                start = buffer.get_iter_at_line(line)
+                end = start.copy()
+                end.forward_to_line_end()
+                text = buffer.get_text(start, end, True)
+                _set_clipboard_text(text + "\n")
+                if lowered == "c":
+                    return True
+                try:
+                    buffer.begin_user_action()
+                    del_end = end.copy()
+                    if not del_end.is_end():
+                        del_end.forward_char()
+                    buffer.delete(start, del_end)
+                finally:
+                    try:
+                        buffer.end_user_action()
+                    except Exception:
+                        pass
+                try:
+                    target = min(line, buffer.get_line_count() - 1)
+                    buffer.place_cursor(buffer.get_iter_at_line(target))
+                except Exception:
+                    pass
+                return True
+            if lowered == "v":
+                text = _get_clipboard_text()
+                if not text or not text.endswith("\n"):
+                    return False
+                stripped = text[:-1]
+                cursor_line = buffer.get_iter_at_mark(buffer.get_insert()).get_line()
+                try:
+                    buffer.begin_user_action()
+                    buffer.insert(buffer.get_iter_at_line(cursor_line), stripped + "\n")
+                finally:
+                    try:
+                        buffer.end_user_action()
+                    except Exception:
+                        pass
+                return True
+            return False
+        except Exception as e:
+            _debug(f"clipboard key failed: {e!r}")
+            return False
+
     def _handle_global_key(self, keyname: str, ctrl: bool, shift: bool, alt: bool) -> bool:
         if not (ctrl and not shift and not alt):
             return False
@@ -196,6 +302,14 @@ class KeybindsPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore[mis
             _debug("key: Ctrl+PageDown next-tab")
             self._step_tab(+1)
             return True
+        if lowered in ("c", "x", "v"):
+            view = self._active_editor_view()
+            if view is None:
+                return False
+            return self._handle_clipboard_key(lowered, view)
+        if lowered == "comma":
+            _debug("key: Ctrl+comma preferences")
+            return self._open_preferences()
         return False
 
     def _on_window_key_press(self, _window, event) -> bool:
