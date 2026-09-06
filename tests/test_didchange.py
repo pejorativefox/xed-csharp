@@ -84,3 +84,11 @@ def test_did_close_drops_tracked_text():
     mgr.did_close("/tmp/I.cs")
     assert mgr._doc_text == {}
     assert mgr.open_docs == {}
+
+def test_did_close_without_open_sends_nothing():
+    """didClose for a never-opened URI kills this Roslyn version
+    (Contract.Fail -> SIGABRT, exit -6). It must be a local no-op."""
+    mgr, fake = _manager()
+    mgr.did_close("/tmp/NeverOpened.md")
+    assert fake.sent == []
+    assert mgr.open_docs == {}

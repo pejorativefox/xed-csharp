@@ -325,6 +325,11 @@ class RoslynManager:
         if self.transport is None:
             return
         uri = file_uri(path)
+        # Never-opened URIs MUST NOT send didClose: this Roslyn version
+        # treats it as fatal (Contract.Fail -> SIGABRT, exit -6) instead
+        # of a no-op, killing the server for every open tab.
+        if uri not in self.open_docs and uri not in self._doc_text:
+            return
         self.open_docs.pop(uri, None)
         self._doc_text.pop(uri, None)
         self.transport.send_notification("textDocument/didClose", {"textDocument": {"uri": uri}})

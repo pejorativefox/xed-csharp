@@ -724,9 +724,7 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         version = self._doc_versions.get(path, 0) + 1
         self._doc_versions[path] = version
         try:
-            known = any(
-                path in uri or uri.endswith(os.path.basename(path)) for uri in self.roslyn.open_docs
-            )
+            known = roslyn_mod.file_uri(path) in self.roslyn.open_docs
         except Exception:
             known = False
         if known:
