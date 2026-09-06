@@ -1,14 +1,15 @@
 """Completion popup (pure Gtk3, no GtkSource version coupling).
 
-Behaves like completion in most editors:
+Behaves like VSCode's suggest widget:
 
 * The editor keeps keyboard focus; the popup never grabs it. All
   navigation is driven by key forwarding from the editor view.
-* Typing filters the list (prefix matches first, then substring).
-* Up/Down (wrapping) and PageUp/PageDown move, Tab/Enter accept,
-  Escape dismisses. Shift+Tab steps to the previous item.
-* Commit characters (``.``, ``(``, ``[``) are handled by the plugin:
-  they accept the current item and then insert normally.
+* Typing filters the list (prefix, then substring, then subsequence —
+  ``wrLn`` matches ``WriteLine`` — on filterText, like VSCode).
+* Up/Down (wrapping) and PageUp/PageDown move, Home/End jump to
+  first/last, Tab/Enter accept, Escape dismisses. Shift+Tab steps back.
+* Commit characters accept the current item and then insert normally
+  (per-item LSP commitCharacters when present, else the C# defaults).
 
 Shown near the cursor when Roslyn answers a completion request.
 """
@@ -22,25 +23,34 @@ gi.require_version("Gdk", "3.0")
 
 from gi.repository import GObject, Gtk, Gdk, GLib  # type: ignore
 
-from .intelligence import CompletionItem, filter_completion, xy_of
+from .intelligence import (
+    COMMIT_CHARACTERS,
+    CompletionItem,
+    best_initial_index,
+    completion_commit_chars,
+    filter_completion,
+    xy_of,
+)
 from .logging_util import debug
 
 #: Key names the editor view forwards to a visible popup. Navigation keys
 #: are consumed; commit characters and plain text fall through so the
 #: editor still inserts them (the plugin refilters/dismisses afterwards).
-#: Left/Right/Home/End intentionally omitted: they move the cursor, which
-#: dismisses completion in most editors.
+#: Left/Right intentionally omitted: they move the cursor, which dismisses
+#: completion in VSCode. Home/End jump to first/last like VSCode.
 NAV_KEYS = frozenset(
     {
         "Up", "KP_Up", "Down", "KP_Down",
         "Page_Up", "KP_Page_Up", "Page_Down", "KP_Page_Down",
+        "Home", "KP_Home", "End", "KP_End",
         "Return", "KP_Enter", "Tab", "ISO_Left_Tab", "Escape",
     }
 )
 
-#: Characters that accept the current item, then insert normally
-#: (``Console.Wri`` + ``.`` -> ``Console.Write.`` + member list refresh).
-COMMIT_CHARS = frozenset({".", "(", "["})
+#: Fallback accept-then-insert characters (``Console.Wri`` + ``.`` ->
+#: ``Console.Write.`` + member list refresh). Per-item LSP commitCharacters
+#: win when present; this set only covers items that send none.
+COMMIT_CHARS = frozenset(COMMIT_CHARACTERS)
 
 
 class CompletionPopup(Gtk.Window):
@@ -124,8 +134,9 @@ class CompletionPopup(Gtk.Window):
     def update_filter(self, prefix: str) -> list[CompletionItem]:
         """Narrow the visible list to what matches the typed prefix.
 
-        Returns the filtered items. The first match is auto-selected so
-        Tab/Enter accepts the top suggestion, like most editors.
+        Returns the filtered items. The server-preselected item wins when
+        visible, else the top match is auto-selected so Tab/Enter accepts
+        it, like VSCode.
         """
         self._prefix = prefix or ""
         self._items = filter_completion(self._all_items, self._prefix)
@@ -133,8 +144,9 @@ class CompletionPopup(Gtk.Window):
         for item in self._items:
             self.store.append([item.label, item.detail, item])
         if self._items:
-            self._select_index(0)
-            self._show_doc(self._items[0])
+            initial = best_initial_index(self._items)
+            self._select_index(initial)
+            self._show_doc(self._items[initial])
         else:
             self._show_doc(None)
         return list(self._items)
@@ -293,7 +305,7 @@ class CompletionPopup(Gtk.Window):
 
     # -- programmatic navigation (driven by view key forwarding) --
     def move_selection(self, delta: int) -> bool:
-        """Move the selection, wrapping at the ends like most editors."""
+        """Move the selection, wrapping at the ends like VSCode."""
         try:
             count = len(self._items)
             if count == 0:
@@ -310,6 +322,31 @@ class CompletionPopup(Gtk.Window):
             return True
         except Exception:
             return False
+
+    def select_first(self) -> bool:
+        if not self._items:
+            return False
+        self._select_index(0)
+        return True
+
+    def select_last(self) -> bool:
+        if not self._items:
+            return False
+        self._select_index(len(self._items) - 1)
+        return True
+
+    def selected_commit_chars(self) -> frozenset:
+        """Commit chars for the selected row (per-item LSP wins)."""
+        try:
+            item = self.selected_item()
+        except Exception:
+            item = None
+        if item is not None:
+            try:
+                return frozenset(completion_commit_chars(item))
+            except Exception:
+                pass
+        return COMMIT_CHARS
 
     def activate_selected(self) -> bool:
         item = self.selected_item()
@@ -328,6 +365,10 @@ class CompletionPopup(Gtk.Window):
             return self.move_selection(-10)
         if name in ("Page_Down", "KP_Page_Down"):
             return self.move_selection(10)
+        if name in ("Home", "KP_Home"):
+            return self.select_first()
+        if name in ("End", "KP_End"):
+            return self.select_last()
         if name == "ISO_Left_Tab":
             # Shift+Tab steps to the previous item instead of accepting.
             return self.move_selection(-1)

@@ -198,7 +198,7 @@ except Exception:  # headless unit tests / missing typelib outside xed
     SolutionExplorer = OutputView = TestPanel = None  # type: ignore[no-redef]
     CompletionPopup = ViewTracker = None  # type: ignore[no-redef]
     NAV_KEYS = frozenset()  # type: ignore[no-redef]
-    COMMIT_CHARS = frozenset({".", "(", "["})  # type: ignore[no-redef]
+    COMMIT_CHARS = frozenset({".", "(", "[", "<", ";", ","})  # type: ignore[no-redef]
     SettingsStore = None  # type: ignore[no-redef]
     buffer_text = cursor_line0 = cursor_offset = doc_path = None  # type: ignore[no-redef]
     is_csharp_doc = None  # type: ignore[no-redef]
@@ -1101,11 +1101,9 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             except Exception as e:
                 debug(f"completion refilter failed: {e!r}")
             return
-        # Single-char auto triggers only pop a NEW list up once the prefix
-        # is meaningful; a visible list is handled above.
+        # VSCode pops the list on the first identifier char; a visible
+        # list is already handled (refilter) above, so always request.
         if trigger.startswith("auto:"):
-            if len(trigger[len("auto:"):]) < 2:
-                return
             trigger_kind, trigger_char = 1, None
         else:
             trigger_kind = 1 if trigger == "invoke" else 2
@@ -1171,13 +1169,23 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             return
         try:
             text = buffer_text(doc)
-            prefix, _start = intel.prefix_at(text, cursor_offset(doc))
+            cur_off = cursor_offset(doc)
+            prefix, _start = intel.prefix_at(text, cur_off)
         except Exception:
             return
         # Cursor left the word (space, ')', cursor move, ...) -> dismiss,
-        # exactly like other editors. Commit chars are handled pre-insert
-        # in _forward_completion_key so they never reach this branch.
+        # like VSCode. Commit chars are handled pre-insert in
+        # _forward_completion_key so they never reach this branch.
+        # Exception: right after a member trigger (``Console.|``) the
+        # prefix is empty but VSCode shows the full member list.
         if not prefix:
+            try:
+                prev = text[cur_off - 1] if cur_off > 0 else ""
+            except Exception:
+                prev = ""
+            if prev in (".", "<", "("):
+                popup.update_filter("")
+                return
             self._dismiss_completion()
             return
         popup.update_filter(prefix)
@@ -1321,12 +1329,18 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
                 return False
         # Commit characters: accept the current item first, then let the
         # keystroke insert normally (so '.' chains into member access).
+        # VSCode uses the selected item's LSP commitCharacters when it
+        # sends any, else the C# defaults.
         try:
             typed = Gdk.keyval_to_unicode(event.keyval)
             char = chr(typed) if typed else ""
         except Exception:
             char = ""
-        if char in COMMIT_CHARS:
+        try:
+            commit_chars = popup.selected_commit_chars()
+        except Exception:
+            commit_chars = COMMIT_CHARS
+        if char and char in commit_chars:
             try:
                 if popup.has_items():
                     popup.activate_selected()
@@ -1338,9 +1352,9 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         if name in ("BackSpace", "Delete", "KP_Delete"):
             self._schedule_refilter()
             return False
-        if name in ("Left", "KP_Left", "Right", "KP_Right",
-                    "Home", "KP_Home", "End", "KP_End"):
-            # Cursor moves -> completion no longer applies.
+        if name in ("Left", "KP_Left", "Right", "KP_Right"):
+            # Cursor moves -> completion no longer applies (VSCode hides
+            # the widget). Home/End are handled above as navigation.
             self._dismiss_completion()
             return False
         if char and intel.is_identifier_char(char):

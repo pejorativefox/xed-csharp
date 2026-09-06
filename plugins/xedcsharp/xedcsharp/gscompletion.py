@@ -326,8 +326,17 @@ class _RoslynCompletionProviderBase:
             return False
 
     def _proposals_for(self, items: list) -> list:
+        # VSCode highlights the preselected item; the framework selects
+        # the first row, so the preselected item leads (stable).
+        try:
+            ordered = sorted(
+                list(items[:MAX_PROPOSALS]),
+                key=lambda it: (0 if bool(getattr(it, "preselect", False)) else 1),
+            )
+        except Exception:
+            ordered = list(items[:MAX_PROPOSALS])
         out = []
-        for item in items[:MAX_PROPOSALS]:
+        for item in ordered:
             try:
                 out.append(
                     RoslynProposal(

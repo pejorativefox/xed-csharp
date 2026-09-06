@@ -368,13 +368,18 @@ def parse_completion(
             )
         )
     # VSCode sorts by sortText when the server provides it; otherwise the
-    # server order is already relevance order — keep it stable.
+    # server order is already relevance order — keep it stable. The
+    # locals-first heuristic only applies when the server sent no
+    # sortText at all (older/partial responses); otherwise it would fight
+    # Roslyn's own relevance order.
     if any(item.sort_text for _, item in indexed):
         indexed.sort(key=lambda pair: (pair[1].sort_text or "\uffff", pair[0]))
         items = [item for _, item in indexed]
+    elif any(item.kind in LOCAL_KINDS for _, item in indexed):
+        items = locals_first([item for _, item in indexed])
     else:
         items = [item for _, item in indexed]
-    return locals_first(items)
+    return items
 
 
 #: LSP kinds treated as locals (variables, parameters, constants): these
@@ -391,6 +396,43 @@ def locals_first(items: list["CompletionItem"]) -> list["CompletionItem"]:
 
 def _match_text(item: "CompletionItem") -> str:
     return (item.filter_text or item.label or "").lower()
+
+
+def fuzzy_score(candidate: str, query: str) -> tuple | None:
+    """VSCode-like fuzzy score (lower is better), None when no match.
+
+    ``candidate``/``query`` are already lowered. Tiers: prefix match (0),
+    substring (1), subsequence (2). Within a tier, earlier + tighter
+    matches win. ``None`` means the query's chars don't appear in order.
+    """
+    if not query:
+        return (3, 0, 0)
+    cand = candidate or ""
+    if cand.startswith(query):
+        return (0, 0, 0)
+    pos = cand.find(query)
+    if pos >= 0:
+        return (1, pos, 0)
+    # Subsequence scan (e.g. ``wrLn`` -> ``WriteLine``, ``cw`` -> ``Console``).
+    ci = 0
+    first = -1
+    gaps = 0
+    qi = 0
+    qlen = len(query)
+    clen = len(cand)
+    while qi < qlen and ci < clen:
+        if cand[ci] == query[qi]:
+            if first < 0:
+                first = ci
+            qi += 1
+        elif first >= 0:
+            gaps += 1
+        ci += 1
+    if qi < qlen:
+        return None
+    last = ci - 1
+    span = last - first if first >= 0 else clen
+    return (2, first, gaps + span)
 
 
 #: LSP kinds that take `(` on accept (callables).
@@ -423,19 +465,19 @@ def completion_suffix(kind: int, insert_text: str) -> str:
 
 
 def rank_for_prefix(items: list["CompletionItem"], prefix: str) -> list["CompletionItem"]:
-    """Cull non-matches and rank by typed prefix, locals first per tier.
+    """Cull non-matches and rank by typed prefix (VSCode-like fuzzy).
 
-    Tiers (stable server order within each): locals starting with the
-    prefix, others starting with it, locals containing it, others
-    containing it. Empty prefix keeps everything, locals first.
+    Tiers: prefix match, substring, subsequence (``wrLn`` -> ``WriteLine``).
+    Matches on ``filterText`` (fallback: label), case-insensitive. Ties
+    keep Roslyn's server order (sortText order from parse_completion).
+    Empty prefix keeps server order when sortText is present, else the
+    locals-first fallback for servers that send no relevance order.
     """
     if not prefix:
+        if any(getattr(i, "sort_text", "") for i in items):
+            return list(items)
         return locals_first(items)
-    lowered = prefix.lower()
-    starts = [i for i in items if _match_text(i).startswith(lowered)]
-    seen = {id(i) for i in starts}
-    contains = [i for i in items if id(i) not in seen and lowered in _match_text(i)]
-    return locals_first(starts) + locals_first(contains)
+    return filter_completion(items, prefix)
 
 
 def completion_filter_text(item: CompletionItem) -> str:
@@ -486,24 +528,47 @@ def prefix_at(text: str, offset: int) -> tuple[str, int]:
 def filter_completion(
     items: list["CompletionItem"], prefix: str
 ) -> list["CompletionItem"]:
-    """Filter items by what the user has typed (case-insensitive).
+    """Filter items by what the user has typed (VSCode-like fuzzy).
 
-    Ranking (stable within each group, preserving Roslyn's relevance order):
+    Matches ``filterText`` (fallback: label), case-insensitive:
       1. labels starting with the prefix
-      2. labels containing the prefix elsewhere
-    An empty prefix returns every item.
+      2. labels containing it as a substring
+      3. labels matching it as a subsequence (``wrLn`` -> ``WriteLine``)
+    Ties keep Roslyn's relevance order. Empty prefix returns every item.
     """
     if not prefix:
         return list(items)
     lowered = prefix.lower()
-    starts, contains = [], []
-    for item in items:
-        label = (item.label or "").lower()
-        if label.startswith(lowered):
-            starts.append(item)
-        elif lowered in label:
-            contains.append(item)
-    return starts + contains
+    scored: list[tuple[tuple, int, CompletionItem]] = []
+    for index, item in enumerate(items):
+        score = fuzzy_score(_match_text(item), lowered)
+        if score is not None:
+            scored.append((score, index, item))
+    scored.sort(key=lambda triple: (triple[0], triple[1]))
+    return [item for _, _, item in scored]
+
+
+def best_initial_index(items: list["CompletionItem"]) -> int:
+    """Index the popup should select first (VSCode preselect wins)."""
+    for index, item in enumerate(items):
+        try:
+            if bool(getattr(item, "preselect", False)):
+                return index
+        except Exception:
+            continue
+    return 0
+
+
+def completion_commit_chars(item: "CompletionItem") -> list[str]:
+    """Effective commit chars: per-item LSP list, else the C# defaults."""
+    try:
+        own = list(getattr(item, "commit_chars", None) or [])
+    except Exception:
+        own = []
+    own = [c for c in own if c]
+    if own:
+        return own
+    return list(COMMIT_CHARACTERS)
 
 
 # ---------------------------------------------------------------------------

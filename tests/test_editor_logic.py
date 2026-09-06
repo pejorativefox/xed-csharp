@@ -321,3 +321,30 @@ def test_rank_for_prefix_tiers_and_cull():
     assert [i.label for i in intel.rank_for_prefix(items, "")] == [
         "count", "recount", "WriteLine", "Counter", "Write", "ToString",
     ]
+
+def test_vscode_fuzzy_preselect_commit():
+    """VSCode parity: subsequence filter on filterText, preselect, commits."""
+    items = [
+        intel.CompletionItem(label="Write"),
+        intel.CompletionItem(label="WriteLine"),
+        intel.CompletionItem(label="TextWriter"),
+    ]
+    # Subsequence (not substring): ``wrLn`` reaches ``WriteLine`` only.
+    assert [i.label for i in intel.filter_completion(items, "wrLn")] == ["WriteLine"]
+    # filterText (not label) is what matches.
+    ft = [intel.CompletionItem(label="Console", filter_text="cwX"),
+          intel.CompletionItem(label="Other")]
+    assert [i.label for i in intel.filter_completion(ft, "cwx")] == ["Console"]
+    # Preselected item wins the initial selection, not index 0.
+    pre = [intel.CompletionItem(label="a"),
+           intel.CompletionItem(label="b", preselect=True)]
+    assert intel.best_initial_index(pre) == 1
+    assert intel.best_initial_index(items) == 0
+    # Per-item LSP commitCharacters win; otherwise the C# defaults.
+    assert intel.completion_commit_chars(
+        intel.CompletionItem(label="M", commit_chars=[";"])) == [";"]
+    assert ";" in intel.completion_commit_chars(items[0])
+    # sortText order survives even when a local kind sorts later.
+    resp = {"result": {"items": [{"label": "b", "sortText": "002", "kind": 6},
+                                 {"label": "a", "sortText": "001", "kind": 2}]}}
+    assert [i.label for i in intel.parse_completion(resp, "x", 1)] == ["a", "b"]

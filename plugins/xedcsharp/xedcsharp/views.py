@@ -399,22 +399,16 @@ class ViewTracker(GObject.Object):
             self.emit("completion-request", path, line, charpos, char)
             return False
         if is_identifier_char(char):
-            # Auto-popup while typing words, like most editors: only once
-            # the prefix is long enough to be useful (avoids flashing the
-            # list on every single letter).
+            # Auto-popup while typing words, like VSCode: from the first
+            # character. The plugin refilters locally when visible and
+            # requests once when hidden.
             try:
                 prefix, _start = prefix_at(buffer_text(doc), cursor_offset(doc))
             except Exception:
                 prefix = char
-            if len(prefix) >= 2:
+            if len(prefix) >= 1:
                 debug(f"completion auto path={path} line={line} char={charpos} prefix={prefix!r}")
                 self.emit("completion-request", path, line, charpos, "auto:" + prefix)
-            elif len(prefix) >= 1:
-                # Single char: still refilter a visible list, but don't pop
-                # a new one up (plugin decides based on visibility).
-                debug(f"completion auto-refilter path={path} prefix={prefix!r}")
-                self.emit("completion-request", path, line, charpos, "auto:" + prefix)
-        return False
 
     # -- context menu -------------------------------------------------
     def _on_populate_popup(self, _view, menu, doc) -> None:
