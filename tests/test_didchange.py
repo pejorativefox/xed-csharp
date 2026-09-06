@@ -92,3 +92,30 @@ def test_did_close_without_open_sends_nothing():
     mgr.did_close("/tmp/NeverOpened.md")
     assert fake.sent == []
     assert mgr.open_docs == {}
+
+
+def test_non_csharp_docs_never_sent():
+    """Roslyn SIGABRTs (exit -6) on didClose for files it never tracked.
+
+    It ignores didOpen for non-C# extensions server-side, so sending any
+    sync notification for them diverges client/server tracking and the
+    later didClose is fatal. All four must be local no-ops (repro:
+    closing config.toml killed the server)."""
+    mgr, fake = _manager()
+    mgr.did_open("/proj/config.toml", "toml", 1, "x = 1\n")
+    mgr.did_change("/proj/config.toml", 2, "x = 2\n")
+    mgr.did_save("/proj/config.toml", "x = 2\n")
+    mgr.did_close("/proj/config.toml")
+    assert fake.sent == []
+    assert mgr.open_docs == {}
+    assert mgr._doc_text == {}
+
+
+def test_toml_close_with_cs_open_sends_nothing():
+    """The exact crash: a .cs doc is tracked, then an untracked .toml
+    tab closes — no didClose may go out for the .toml."""
+    mgr, fake = _manager()
+    mgr.did_open("/proj/A.cs", "csharp", 1, "class A {}\n")
+    mgr.did_close("/proj/config.toml")
+    assert [m for m, _ in fake.sent] == ["textDocument/didOpen"]
+    assert list(mgr.open_docs) == [roslyn.file_uri("/proj/A.cs")]

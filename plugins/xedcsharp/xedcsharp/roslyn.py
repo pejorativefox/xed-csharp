@@ -287,7 +287,13 @@ class RoslynManager:
             debug(f"roslyn: {params.get('message', '')}")
 
     # -- document sync -------------------------------------------------
+    # Roslyn only tracks C# documents. A didOpen for any other extension
+    # is ignored server-side (never tracked), so a later didClose for it
+    # is fatal here (Contract.Fail -> SIGABRT, exit -6). Gate everything
+    # centrally: no caller can kill the server with a non-C# path.
     def did_open(self, path: str, language_id: str, version: int, text: str) -> None:
+        if not path.endswith(".cs"):
+            return
         if self.transport is None:
             return
         uri = file_uri(path)
@@ -299,6 +305,8 @@ class RoslynManager:
         )
 
     def did_change(self, path: str, version: int, text: str) -> None:
+        if not path.endswith(".cs"):
+            return
         if self.transport is None:
             return
         uri = file_uri(path)
@@ -324,6 +332,8 @@ class RoslynManager:
     def did_close(self, path: str) -> None:
         if self.transport is None:
             return
+        if not path.endswith(".cs"):
+            return
         uri = file_uri(path)
         # Never-opened URIs MUST NOT send didClose: this Roslyn version
         # treats it as fatal (Contract.Fail -> SIGABRT, exit -6) instead
@@ -336,6 +346,8 @@ class RoslynManager:
 
     def did_save(self, path: str, text: str) -> None:
         if self.transport is None:
+            return
+        if not path.endswith(".cs"):
             return
         uri = file_uri(path)
         self.transport.send_notification(

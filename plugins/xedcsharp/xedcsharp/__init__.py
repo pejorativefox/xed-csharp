@@ -747,10 +747,13 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             self._format_doc_path(path)
 
     def _on_doc_closed(self, path: str) -> None:
-        try:
-            self.roslyn.did_close(path)
-        except Exception:
-            pass
+        # doc-closed fires for every tab; only C# docs are ever sent to
+        # Roslyn (which SIGABRTs on didClose for anything else).
+        if path.endswith(".cs"):
+            try:
+                self.roslyn.did_close(path)
+            except Exception:
+                pass
         try:
             uri = roslyn_mod.file_uri(path)
             self.diagnostics.pop(uri, None)
@@ -1007,6 +1010,8 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
         try:
             if getattr(self.roslyn, "state", "") != "ready":
                 return
+            if not path.endswith(".cs"):
+                return
             doc = self._find_doc(path)
             if doc is None:
                 return
@@ -1014,10 +1019,7 @@ class CSharpDevKitPlugin(GObject.Object, Xed.WindowActivatable):  # type: ignore
             version = self._doc_versions.get(path, 0) + 1
             self._doc_versions[path] = version
             try:
-                known = any(
-                    path in uri or uri.endswith(os.path.basename(path))
-                    for uri in self.roslyn.open_docs
-                )
+                known = roslyn_mod.file_uri(path) in self.roslyn.open_docs
             except Exception:
                 known = False
             if known:
